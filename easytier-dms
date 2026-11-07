@@ -13,6 +13,8 @@ CONFIG_DIR="${EASYTIER_DMS_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/easytie
 PROFILES_FILE="$CONFIG_DIR/profiles.json"
 RUNTIME_DIR="${EASYTIER_DMS_RUNTIME_DIR:-${XDG_RUNTIME_DIR:-/tmp/easytier-dms-$(id -u)}/easytier-dms}"
 MANAGED_ENV_FILE="$RUNTIME_DIR/managed.env"
+MANAGED_TOML_FILE="$RUNTIME_DIR/managed.toml"
+ROOT_RUNTIME_DIR="/run/easytier-dms"
 MANAGED_UNIT="dms-easytier-managed.service"
 
 DEFAULT_RPC="127.0.0.1:15888"
@@ -72,11 +74,326 @@ validate_connector_url() {
     return 0
 }
 
+validate_socket_addr() {
+    local addr="$1"
+    if [[ -z "$addr" || "$addr" == -* || "$addr" == *[[:space:]]* || "$addr" != *:* ]]; then
+        return 1
+    fi
+    local port="${addr##*:}"
+    if [[ -z "$port" || "$port" == *[!0-9]* ]]; then
+        return 1
+    fi
+    return 0
+}
+
 escape_env_value() {
     local val="$1"
     val="${val//\\/\\\\}"
     val="${val//\"/\\\"}"
     printf '%s' "$val"
+}
+
+# [Profile Schema & TOML Rendering]
+normalize_profile_json() {
+    local raw_json="$1"
+    local gen_id="${2:-prof-default}"
+    printf '%s' "$raw_json" | jq -ce --arg genId "$gen_id" '
+        def trim_str: tostring | gsub("^\\s+|\\s+$"; "");
+        def clean_arr: [ (. // [])[] | trim_str | select(length > 0) ] | unique;
+        def bool_or($v; $d): if ($v == true or $v == false) then $v else $d end;
+        def int_range($v; $min; $max; $d):
+            (($v // $d) | tonumber? // $d | floor) as $n
+            | if ($n >= $min and $n <= $max) then $n else $d end;
+        def digits_only: trim_str | if test("^[0-9]+$") then . else "" end;
+
+        (.flags // {}) as $rf
+        | bool_or($rf.noTun; (.noTun == true)) as $noTunVal
+        | {
+            id: ((.id // "" | trim_str) | if length > 0 then . else $genId end),
+            name: (.name // "" | trim_str),
+            configMode: (
+                (.configMode // "manual" | trim_str) as $m
+                | if ($m == "uri" or $m == "standalone") then $m else "manual" end
+            ),
+            configServer: (.configServer // "" | trim_str),
+            machineId: (.machineId // "" | trim_str),
+            instanceName: (.instanceName // "" | trim_str),
+            hostname: (.hostname // "" | trim_str),
+            networkName: (.networkName // "" | trim_str),
+            networkSecret: (.networkSecret // "" | tostring),
+            dhcp: (.dhcp != false),
+            ipv4: (.ipv4 // "" | trim_str),
+            ipv6: (.ipv6 // "" | trim_str),
+            ipv6PublicProvider: (.ipv6PublicProvider == true),
+            ipv6PublicAuto: (.ipv6PublicAuto == true),
+            peers: (.peers | clean_arr),
+            listeners: (.listeners | clean_arr),
+            mappedListeners: (.mappedListeners | clean_arr),
+            noListener: (.noListener == true),
+            proxyCidrs: (.proxyCidrs | clean_arr),
+            manualRoutes: (.manualRoutes | clean_arr),
+            exitNodes: (.exitNodes | clean_arr),
+            socks5: (.socks5 // "" | trim_str),
+            vpnPortalEnabled: (.vpnPortalEnabled == true),
+            vpnClientCidr: ((.vpnClientCidr // "10.144.145.0/24" | trim_str) | if length > 0 then . else "10.144.145.0/24" end),
+            vpnWireguardListen: ((.vpnWireguardListen // "0.0.0.0:11011" | trim_str) | if length > 0 then . else "0.0.0.0:11011" end),
+            portForwards: [
+                (.portForwards // [])[]
+                | select(type == "object")
+                | {
+                    proto: (if ((.proto // "tcp" | trim_str | ascii_downcase) == "udp") then "udp" else "tcp" end),
+                    bindAddr: ((.bindAddr // .bind_addr // "") | trim_str),
+                    dstAddr: ((.dstAddr // .dst_addr // "") | trim_str)
+                }
+                | select((.bindAddr | length > 0) and (.dstAddr | length > 0))
+            ],
+            flags: {
+                defaultProtocol: (
+                    ($rf.defaultProtocol // "tcp" | trim_str | ascii_downcase) as $p
+                    | if ($p == "udp" or $p == "ws" or $p == "wss" or $p == "quic" or $p == "wg") then $p else "tcp" end
+                ),
+                encryptionAlgorithm: (
+                    ($rf.encryptionAlgorithm // "aes-gcm" | trim_str | ascii_downcase) as $a
+                    | if ($a == "aes-256-gcm" or $a == "chacha20" or $a == "xor") then $a else "aes-gcm" end
+                ),
+                compression: (if ($rf.compression // "none" | trim_str | ascii_downcase) == "zstd" then "zstd" else "none" end),
+                mtu: int_range($rf.mtu; 576; 65535; 1380),
+                multiThread: bool_or($rf.multiThread; true),
+                multiThreadCount: int_range($rf.multiThreadCount; 2; 128; 2),
+                devName: ($rf.devName // "" | trim_str),
+                relayNetworkWhitelist: (if ($rf | has("relayNetworkWhitelist")) then ($rf.relayNetworkWhitelist | trim_str) else "*" end),
+                tldDnsZone: (($rf.tldDnsZone // "et.net." | trim_str) | if length > 0 then . else "et.net." end),
+                foreignRelayBpsLimit: ($rf.foreignRelayBpsLimit // "" | digits_only),
+                instanceRecvBpsLimit: ($rf.instanceRecvBpsLimit // "" | digits_only),
+                enableEncryption: bool_or($rf.enableEncryption; true),
+                enableIpv6: bool_or($rf.enableIpv6; true),
+                latencyFirst: bool_or($rf.latencyFirst; false),
+                enableExitNode: bool_or($rf.enableExitNode; false),
+                noTun: $noTunVal,
+                useSmoltcp: bool_or($rf.useSmoltcp; false),
+                bindDevice: bool_or($rf.bindDevice; true),
+                proxyForwardBySystem: bool_or($rf.proxyForwardBySystem; false),
+                enableP2p: bool_or($rf.enableP2p; true),
+                p2pOnly: bool_or($rf.p2pOnly; false),
+                lazyP2p: bool_or($rf.lazyP2p; false),
+                needP2p: bool_or($rf.needP2p; false),
+                disableTcpHolePunching: bool_or($rf.disableTcpHolePunching; false),
+                disableUdpHolePunching: bool_or($rf.disableUdpHolePunching; false),
+                disableSymHolePunching: bool_or($rf.disableSymHolePunching; false),
+                enableUpnp: bool_or($rf.enableUpnp; true),
+                enableKcpProxy: bool_or($rf.enableKcpProxy; false),
+                disableKcpInput: bool_or($rf.disableKcpInput; false),
+                enableQuicProxy: bool_or($rf.enableQuicProxy; false),
+                disableQuicInput: bool_or($rf.disableQuicInput; false),
+                relayAllPeerRpc: bool_or($rf.relayAllPeerRpc; false),
+                disableRelayData: bool_or($rf.disableRelayData; false),
+                disableRelayKcp: bool_or($rf.disableRelayKcp; false),
+                disableRelayQuic: bool_or($rf.disableRelayQuic; false),
+                enableRelayForeignKcp: bool_or($rf.enableRelayForeignKcp; false),
+                enableRelayForeignQuic: bool_or($rf.enableRelayForeignQuic; false),
+                acceptDns: bool_or($rf.acceptDns; false),
+                privateMode: bool_or($rf.privateMode; false),
+                enableUdpBroadcastRelay: bool_or($rf.enableUdpBroadcastRelay; false)
+            },
+            noTun: $noTunVal,
+            consoleLogLevel: (
+                (.consoleLogLevel // "warn" | trim_str | ascii_downcase) as $l
+                | if ($l == "off" or $l == "error" or $l == "warn" or $l == "info" or $l == "debug" or $l == "trace") then $l else "warn" end
+            ),
+            fileLogLevel: (
+                (.fileLogLevel // "" | trim_str | ascii_downcase) as $l
+                | if ($l == "error" or $l == "warn" or $l == "info" or $l == "debug" or $l == "trace") then $l else "" end
+            ),
+            fileLogDir: (.fileLogDir // "" | trim_str),
+            fileLogName: (.fileLogName // "" | trim_str)
+        }
+    '
+}
+
+validate_normalized_profile() {
+    local norm="$1"
+    local prof_id prof_name cfg_mode cfg_srv net_name net_secret
+    prof_id="$(jq -r '.id' <<<"$norm")"
+    prof_name="$(jq -r '.name' <<<"$norm")"
+    cfg_mode="$(jq -r '.configMode' <<<"$norm")"
+    cfg_srv="$(jq -r '.configServer' <<<"$norm")"
+    net_name="$(jq -r '.networkName' <<<"$norm")"
+    net_secret="$(jq -r '.networkSecret' <<<"$norm")"
+
+    if [[ "$prof_id" == *[!a-zA-Z0-9_-]* ]]; then
+        printf 'Invalid profile ID\n' >&2
+        return 1
+    fi
+    if [[ -z "$prof_name" ]]; then
+        printf 'Profile name is required\n' >&2
+        return 1
+    fi
+    if [[ "$cfg_srv" == *$'\n'* || "$cfg_srv" == *$'\r'* || "$net_secret" == *$'\n'* || "$net_secret" == *$'\r'* ]]; then
+        printf 'Credentials must not contain newlines\n' >&2
+        return 1
+    fi
+    if [[ "$cfg_mode" == "uri" ]]; then
+        if [[ -z "$cfg_srv" ]]; then
+            printf 'Config server URI is required\n' >&2
+            return 1
+        fi
+        return 0
+    fi
+
+    if [[ -z "$net_name" || "$net_name" == -* ]]; then
+        printf 'Valid network name is required\n' >&2
+        return 1
+    fi
+
+    local item
+    while IFS= read -r item; do
+        [[ -z "$item" ]] && continue
+        if ! validate_connector_url "$item"; then
+            printf 'Invalid peer URL: %s\n' "$item" >&2
+            return 1
+        fi
+    done < <(jq -r '.peers[]' <<<"$norm")
+
+    while IFS= read -r item; do
+        [[ -z "$item" ]] && continue
+        if ! validate_connector_url "$item"; then
+            printf 'Invalid listener URL: %s\n' "$item" >&2
+            return 1
+        fi
+    done < <(jq -r '.listeners[], .mappedListeners[]' <<<"$norm")
+
+    while IFS= read -r item; do
+        [[ -z "$item" ]] && continue
+        if [[ "$item" == -* || "$item" == *[!0-9./a-fA-F:\>-]* ]]; then
+            printf 'Invalid CIDR or route: %s\n' "$item" >&2
+            return 1
+        fi
+    done < <(jq -r '.proxyCidrs[], .manualRoutes[], .exitNodes[]' <<<"$norm")
+
+    local bind_a dst_a
+    while IFS=$'\t' read -r bind_a dst_a; do
+        [[ -z "$bind_a" && -z "$dst_a" ]] && continue
+        if ! validate_socket_addr "$bind_a" || ! validate_socket_addr "$dst_a"; then
+            printf 'Invalid port forward address: %s -> %s\n' "$bind_a" "$dst_a" >&2
+            return 1
+        fi
+    done < <(jq -r '.portForwards[] | "\(.bindAddr)\t\(.dstAddr)"' <<<"$norm")
+
+    if [[ "$(jq -r '.vpnPortalEnabled' <<<"$norm")" == "true" ]]; then
+        local v_cidr v_listen
+        v_cidr="$(jq -r '.vpnClientCidr' <<<"$norm")"
+        v_listen="$(jq -r '.vpnWireguardListen' <<<"$norm")"
+        if [[ -z "$v_cidr" || "$v_cidr" != */* ]] || ! validate_socket_addr "$v_listen"; then
+            printf 'Invalid WireGuard VPN Portal settings\n' >&2
+            return 1
+        fi
+    fi
+    return 0
+}
+
+render_profile_toml() {
+    local norm="$1"
+    printf '%s' "$norm" | jq -r '
+        def socks_norm($s):
+            if ($s | length) == 0 then ""
+            elif ($s | startswith("socks5://")) then $s
+            elif ($s | test("^[0-9]+$")) then ("socks5://0.0.0.0:" + $s)
+            elif ($s | contains("://") | not) then ("socks5://" + $s)
+            else $s end;
+
+        [
+            (if (.instanceName | length) > 0 and .instanceName != "default" then "instance_name = \(.instanceName | @json)" else empty end),
+            (if (.hostname | length) > 0 then "hostname = \(.hostname | @json)" else empty end),
+            (if .dhcp then "dhcp = true" elif (.ipv4 | length) > 0 then "ipv4 = \(.ipv4 | @json)" else empty end),
+            (if (.ipv6 | length) > 0 then "ipv6 = \(.ipv6 | @json)" else empty end),
+            (if .ipv6PublicProvider then "ipv6_public_addr_provider = true" else empty end),
+            (if .ipv6PublicAuto then "ipv6_public_addr_auto = true" else empty end),
+            (if .noListener then "listeners = []" elif (.listeners | length) > 0 then "listeners = \(.listeners | @json)" else empty end),
+            (if (.mappedListeners | length) > 0 then "mapped_listeners = \(.mappedListeners | @json)" else empty end),
+            (if (.exitNodes | length) > 0 then "exit_nodes = \(.exitNodes | @json)" else empty end),
+            (if (.manualRoutes | length) > 0 then "routes = \(.manualRoutes | @json)" else empty end),
+            (socks_norm(.socks5) as $sk | if ($sk | length) > 0 then "socks5_proxy = \($sk | @json)" else empty end),
+            "",
+            "[network_identity]",
+            "network_name = \((if (.networkName | length) > 0 then .networkName else "default" end) | @json)",
+            (if (.networkSecret | length) > 0 then "network_secret = \(.networkSecret | @json)" else empty end),
+            (
+                if .configMode == "manual" then
+                    (.peers[] | "", "[[peer]]", "uri = \(. | @json)")
+                else empty end
+            ),
+            (.proxyCidrs[] | "", "[[proxy_network]]", "cidr = \(. | @json)"),
+            (
+                if .vpnPortalEnabled then
+                    "", "[vpn_portal_config]",
+                    "client_cidr = \(.vpnClientCidr | @json)",
+                    "wireguard_listen = \(.vpnWireguardListen | @json)"
+                else empty end
+            ),
+            (
+                .portForwards[] |
+                "", "[[port_forward]]",
+                "bind_addr = \(.bindAddr | @json)",
+                "dst_addr = \(.dstAddr | @json)",
+                "proto = \(.proto | @json)"
+            ),
+            "",
+            "[flags]",
+            "default_protocol = \(.flags.defaultProtocol | @json)",
+            (if (.flags.devName | length) > 0 then "dev_name = \(.flags.devName | @json)" else empty end),
+            "enable_encryption = \(.flags.enableEncryption)",
+            "encryption_algorithm = \(.flags.encryptionAlgorithm | @json)",
+            "enable_ipv6 = \(.flags.enableIpv6)",
+            "mtu = \(.flags.mtu)",
+            "latency_first = \(.flags.latencyFirst)",
+            "enable_exit_node = \(.flags.enableExitNode)",
+            "proxy_forward_by_system = \(.flags.proxyForwardBySystem)",
+            "no_tun = \(.flags.noTun)",
+            "use_smoltcp = \(.flags.useSmoltcp)",
+            "relay_network_whitelist = \(.flags.relayNetworkWhitelist | @json)",
+            "disable_p2p = \(.flags.enableP2p | not)",
+            "p2p_only = \(.flags.p2pOnly)",
+            "lazy_p2p = \(.flags.lazyP2p)",
+            "need_p2p = \(.flags.needP2p)",
+            "relay_all_peer_rpc = \(.flags.relayAllPeerRpc)",
+            "disable_tcp_hole_punching = \(.flags.disableTcpHolePunching)",
+            "disable_udp_hole_punching = \(.flags.disableUdpHolePunching)",
+            "disable_sym_hole_punching = \(.flags.disableSymHolePunching)",
+            "disable_upnp = \(.flags.enableUpnp | not)",
+            "multi_thread = \(.flags.multiThread)",
+            (if .flags.multiThreadCount > 2 then "multi_thread_count = \(.flags.multiThreadCount)" else empty end),
+            (if .flags.compression == "zstd" then "data_compress_algo = 2" else empty end),
+            "bind_device = \(.flags.bindDevice)",
+            "enable_kcp_proxy = \(.flags.enableKcpProxy)",
+            "disable_kcp_input = \(.flags.disableKcpInput)",
+            "enable_quic_proxy = \(.flags.enableQuicProxy)",
+            "disable_quic_input = \(.flags.disableQuicInput)",
+            "disable_relay_data = \(.flags.disableRelayData)",
+            "disable_relay_kcp = \(.flags.disableRelayKcp)",
+            "disable_relay_quic = \(.flags.disableRelayQuic)",
+            "enable_relay_foreign_network_kcp = \(.flags.enableRelayForeignKcp)",
+            "enable_relay_foreign_network_quic = \(.flags.enableRelayForeignQuic)",
+            "accept_dns = \(.flags.acceptDns)",
+            "tld_dns_zone = \(.flags.tldDnsZone | @json)",
+            "private_mode = \(.flags.privateMode)",
+            "enable_udp_broadcast_relay = \(.flags.enableUdpBroadcastRelay)",
+            (if (.flags.foreignRelayBpsLimit | length) > 0 then "foreign_relay_bps_limit = \(.flags.foreignRelayBpsLimit)" else empty end),
+            (if (.flags.instanceRecvBpsLimit | length) > 0 then "instance_recv_bps_limit = \(.flags.instanceRecvBpsLimit)" else empty end),
+            (
+                if (.consoleLogLevel | length) > 0 and .consoleLogLevel != "warn" then
+                    "", "[console_logger]", "level = \(.consoleLogLevel | @json)"
+                else empty end
+            ),
+            (
+                if (.fileLogLevel | length) > 0 then
+                    "", "[file_logger]",
+                    "level = \(.fileLogLevel | @json)",
+                    (if (.fileLogDir | length) > 0 then "dir = \(.fileLogDir | @json)" else empty end),
+                    (if (.fileLogName | length) > 0 then "file = \(.fileLogName | @json)" else empty end)
+                else empty end
+            )
+        ] | join("\n")
+    '
 }
 
 # [Profile Storage]
@@ -113,10 +430,14 @@ sanitize_profiles_summary() {
                 name: (.name // ""),
                 configMode: (.configMode // "manual"),
                 networkName: (.networkName // ""),
-                dhcp: (.dhcp == true),
+                dhcp: (.dhcp != false),
                 ipv4: (.ipv4 // ""),
                 peerCount: ((.peers // []) | length),
-                noTun: (.noTun == true)
+                listenerCount: ((.listeners // []) | length),
+                proxyCount: ((.proxyCidrs // []) | length),
+                portForwardCount: ((.portForwards // []) | length),
+                vpnPortalEnabled: (.vpnPortalEnabled == true),
+                noTun: (if (.flags | type) == "object" and (.flags | has("noTun")) then (.flags.noTun == true) else (.noTun == true) end)
             }
         ]
     }'
@@ -212,7 +533,7 @@ start_managed_profile() {
         return 1
     fi
 
-    local store profile_id profile_json
+    local store profile_id raw_prof norm
     store="$(read_profiles_store)"
     profile_id="$req_id"
     if [[ -z "$profile_id" ]]; then
@@ -226,112 +547,75 @@ start_managed_profile() {
         return 1
     fi
 
-    profile_json="$(jq -ce --arg id "$profile_id" '(.profiles[] | select(.id == $id))' <<<"$store" 2>/dev/null || true)"
-    if [[ -z "$profile_json" ]]; then
+    raw_prof="$(jq -ce --arg id "$profile_id" '(.profiles[] | select(.id == $id))' <<<"$store" 2>/dev/null || true)"
+    if [[ -z "$raw_prof" ]]; then
         printf 'Profile not found: %s\n' "$profile_id" >&2
         return 1
     fi
 
-    # Update activeProfileId if explicitly chosen
+    norm="$(normalize_profile_json "$raw_prof" "$profile_id")"
+    if ! validate_normalized_profile "$norm"; then
+        return 1
+    fi
+
     if [[ "$(jq -r '.activeProfileId // ""' <<<"$store")" != "$profile_id" ]]; then
         store="$(jq -c --arg id "$profile_id" '.activeProfileId = $id' <<<"$store")"
         write_profiles_store "$store"
     fi
 
-    local config_mode config_server net_name net_secret dhcp ipv4 hostname no_tun
-    config_mode="$(jq -r '.configMode // "manual"' <<<"$profile_json")"
-    config_server="$(jq -r '.configServer // ""' <<<"$profile_json")"
-    net_name="$(jq -r '.networkName // ""' <<<"$profile_json")"
-    net_secret="$(jq -r '.networkSecret // ""' <<<"$profile_json")"
-    dhcp="$(jq -r '.dhcp == true' <<<"$profile_json")"
-    ipv4="$(jq -r '.ipv4 // ""' <<<"$profile_json")"
-    hostname="$(jq -r '.hostname // ""' <<<"$profile_json")"
-    no_tun="$(jq -r '.noTun == true' <<<"$profile_json")"
-
-    if [[ "$config_server" == *$'\n'* || "$config_server" == *$'\r'* || "$net_secret" == *$'\n'* || "$net_secret" == *$'\r'* ]]; then
-        printf 'Profile credentials must not contain newlines\n' >&2
-        return 1
-    fi
-
-    local -a core_args=("-r" "$rpc")
+    local config_mode config_server machine_id no_tun
+    config_mode="$(jq -r '.configMode' <<<"$norm")"
+    config_server="$(jq -r '.configServer' <<<"$norm")"
+    machine_id="$(jq -r '.machineId' <<<"$norm")"
+    no_tun="$(jq -r '.flags.noTun' <<<"$norm")"
 
     ensure_private_dir "$RUNTIME_DIR"
     local tmp_env="${MANAGED_ENV_FILE}.tmp.$$"
+    local tmp_toml="${MANAGED_TOML_FILE}.tmp.$$"
+    local -a core_args=("-r" "$rpc")
 
     if [[ "$config_mode" == "uri" ]]; then
-        if [[ -z "$config_server" ]]; then
-            printf 'Config server URI is required\n' >&2
-            return 1
-        fi
         (
             umask 077
             printf 'ET_CONFIG_SERVER="%s"\n' "$(escape_env_value "$config_server")" >"$tmp_env"
+            : >"$tmp_toml"
         )
-    else
-        if [[ -z "$net_name" || "$net_name" == -* ]]; then
-            printf 'Valid network name is required\n' >&2
-            return 1
+        if [[ -n "$machine_id" ]]; then
+            if [[ "$machine_id" == -* || "$machine_id" == *[[:space:]]* ]]; then
+                rm -f "$tmp_env" "$tmp_toml"
+                printf 'Invalid machine ID\n' >&2
+                return 1
+            fi
+            core_args+=("--machine-id" "$machine_id")
         fi
-        core_args+=("--network-name" "$net_name")
+        if [[ "$no_tun" == "true" ]]; then
+            core_args+=("--no-tun")
+        fi
+    else
         (
             umask 077
-            if [[ -n "$net_secret" ]]; then
-                printf 'ET_NETWORK_SECRET="%s"\n' "$(escape_env_value "$net_secret")" >"$tmp_env"
-            else
-                : >"$tmp_env"
-            fi
+            : >"$tmp_env"
+            render_profile_toml "$norm" >"$tmp_toml"
         )
 
-        if [[ "$dhcp" == "true" ]]; then
-            core_args+=("-d")
-        elif [[ -n "$ipv4" ]]; then
-            if [[ "$ipv4" == -* || "$ipv4" == *[[:space:]]* ]]; then
-                rm -f "$tmp_env"
-                printf 'Invalid virtual IPv4: %s\n' "$ipv4" >&2
-                return 1
-            fi
-            core_args+=("-i" "$ipv4")
+        local chk_err=""
+        if ! chk_err="$(cd "$RUNTIME_DIR" && "$EASYTIER_CORE_BIN" -c "$tmp_toml" --check-config 2>&1)"; then
+            rm -f "$tmp_env" "$tmp_toml" "$RUNTIME_DIR/easytier-panic.log" 2>/dev/null || true
+            printf 'Config validation failed: %s\n' "$chk_err" >&2
+            return 1
         fi
+        rm -f "$RUNTIME_DIR/easytier-panic.log" 2>/dev/null || true
 
-        if [[ -n "$hostname" ]]; then
-            if [[ "$hostname" == -* || "$hostname" == *[!a-zA-Z0-9._-]* ]]; then
-                rm -f "$tmp_env"
-                printf 'Invalid hostname: %s\n' "$hostname" >&2
-                return 1
-            fi
-            core_args+=("--hostname" "$hostname")
+        if [[ "$no_tun" == "true" ]]; then
+            core_args+=("-c" "$MANAGED_TOML_FILE")
+        else
+            core_args+=("-c" "$ROOT_RUNTIME_DIR/managed.toml")
         fi
-
-        local peer
-        while IFS= read -r peer; do
-            [[ -z "$peer" ]] && continue
-            if ! validate_connector_url "$peer"; then
-                rm -f "$tmp_env"
-                printf 'Invalid peer URL: %s\n' "$peer" >&2
-                return 1
-            fi
-            core_args+=("-p" "$peer")
-        done < <(jq -r '(.peers // [])[] | tostring' <<<"$profile_json")
-
-        local cidr
-        while IFS= read -r cidr; do
-            [[ -z "$cidr" ]] && continue
-            if [[ "$cidr" == -* || "$cidr" == *[!0-9./a-fA-F:\>-]* ]]; then
-                rm -f "$tmp_env"
-                printf 'Invalid proxy CIDR: %s\n' "$cidr" >&2
-                return 1
-            fi
-            core_args+=("-n" "$cidr")
-        done < <(jq -r '(.proxyCidrs // [])[] | tostring' <<<"$profile_json")
-    fi
-
-    if [[ "$no_tun" == "true" ]]; then
-        core_args+=("--no-tun")
     fi
 
     mv -f "$tmp_env" "$MANAGED_ENV_FILE"
+    mv -f "$tmp_toml" "$MANAGED_TOML_FILE"
 
-    # Stop any user-scope managed instance first
     "$SYSTEMCTL_BIN" --user stop "$MANAGED_UNIT" 2>/dev/null || true
     "$SYSTEMCTL_BIN" --user reset-failed "$MANAGED_UNIT" 2>/dev/null || true
 
@@ -341,11 +625,10 @@ start_managed_profile() {
     systemctl_path="$(command -v "$SYSTEMCTL_BIN")"
 
     if [[ "$no_tun" == "true" ]]; then
-        # Also stop system-scope managed instance if it was previously running
         local sys_state
         sys_state="$(service_state "$MANAGED_UNIT" "system")"
         if [[ "$sys_state" == "active" || "$sys_state" == "activating" ]]; then
-            run_as_root "$systemctl_path" stop "$MANAGED_UNIT" || true
+            run_as_root "$SELF_SCRIPT" _root-managed-apply stop "$systemctl_path" || true
         fi
         "$systemd_run_path" --user \
             --unit="$MANAGED_UNIT" \
@@ -355,7 +638,7 @@ start_managed_profile() {
             --property="EnvironmentFile=$MANAGED_ENV_FILE" \
             "$core_path" "${core_args[@]}" >/dev/null
     else
-        run_as_root "$SELF_SCRIPT" _root-managed-apply start "$systemctl_path" "$systemd_run_path" "$MANAGED_ENV_FILE" "$core_path" "${core_args[@]}"
+        run_as_root "$SELF_SCRIPT" _root-managed-apply start "$systemctl_path" "$systemd_run_path" "$MANAGED_ENV_FILE" "$MANAGED_TOML_FILE" "$core_path" "${core_args[@]}"
     fi
 }
 
@@ -373,7 +656,7 @@ stop_managed_profile() {
             run_as_root "$SELF_SCRIPT" _root-managed-apply stop "$systemctl_path"
         fi
     fi
-    rm -f "$MANAGED_ENV_FILE" 2>/dev/null || true
+    rm -f "$MANAGED_ENV_FILE" "$MANAGED_TOML_FILE" "$RUNTIME_DIR/easytier-panic.log" 2>/dev/null || true
 }
 
 # [RPC Query & Sanitization]
@@ -700,22 +983,28 @@ case "$cmd" in
         if [[ "$sub_op" == "stop" ]]; then
             "$systemctl_path" stop "$MANAGED_UNIT" 2>/dev/null || true
             "$systemctl_path" reset-failed "$MANAGED_UNIT" 2>/dev/null || true
+            rm -rf "$ROOT_RUNTIME_DIR" 2>/dev/null || true
             exit 0
         elif [[ "$sub_op" == "start" ]]; then
             systemd_run_path="${4:-systemd-run}"
             env_file="${5:-}"
-            core_path="${6:-}"
-            shift 6
+            toml_file="${6:-}"
+            core_path="${7:-}"
+            shift 7
             "$systemctl_path" stop "$MANAGED_UNIT" 2>/dev/null || true
             "$systemctl_path" reset-failed "$MANAGED_UNIT" 2>/dev/null || true
+            mkdir -p "$ROOT_RUNTIME_DIR"
+            chmod 700 "$ROOT_RUNTIME_DIR"
+            install -m 600 "$env_file" "$ROOT_RUNTIME_DIR/managed.env"
+            install -m 600 "$toml_file" "$ROOT_RUNTIME_DIR/managed.toml"
             "$systemd_run_path" \
                 --unit="$MANAGED_UNIT" \
                 --collect \
                 --property=Restart=on-failure \
                 --property=RestartSec=3s \
-                --property="CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW" \
-                --property="AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW" \
-                --property="EnvironmentFile=$env_file" \
+                --property="CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE" \
+                --property="AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE" \
+                --property="EnvironmentFile=$ROOT_RUNTIME_DIR/managed.env" \
                 "$core_path" "$@" >/dev/null
             exit 0
         else
@@ -871,58 +1160,19 @@ case "$cmd" in
 
         gen_id="prof-$(date +%s)-$RANDOM"
         normalized=""
-        if ! normalized="$(printf '%s' "$raw_profile" | jq -ce --arg genId "$gen_id" '
-            def trim_str: tostring | gsub("^\\s+|\\s+$"; "");
-            {
-                id: ((.id // "" | trim_str) | if length > 0 then . else $genId end),
-                name: (.name // "" | trim_str),
-                configMode: (if (.configMode // "manual") == "uri" then "uri" else "manual" end),
-                configServer: (.configServer // "" | trim_str),
-                networkName: (.networkName // "" | trim_str),
-                networkSecret: (.networkSecret // "" | tostring),
-                dhcp: (.dhcp != false),
-                ipv4: (.ipv4 // "" | trim_str),
-                hostname: (.hostname // "" | trim_str),
-                peers: [ (.peers // [])[] | trim_str | select(length > 0) ],
-                proxyCidrs: [ (.proxyCidrs // [])[] | trim_str | select(length > 0) ],
-                noTun: (.noTun == true)
-            }
-        ' 2>/dev/null)"; then
+        if ! normalized="$(normalize_profile_json "$raw_profile" "$gen_id" 2>/dev/null)"; then
             json_error "Malformed profile JSON"
             exit 1
         fi
 
+        val_err=""
+        if ! val_err="$(validate_normalized_profile "$normalized" 2>&1)"; then
+            clean_val="$(printf '%s' "$val_err" | tr '\r\n' '  ' | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//')"
+            json_error "${clean_val:-Invalid profile configuration}"
+            exit 1
+        fi
+
         prof_id="$(jq -r '.id' <<<"$normalized")"
-        prof_name="$(jq -r '.name' <<<"$normalized")"
-        cfg_mode="$(jq -r '.configMode' <<<"$normalized")"
-        cfg_srv="$(jq -r '.configServer' <<<"$normalized")"
-        net_name="$(jq -r '.networkName' <<<"$normalized")"
-
-        if [[ "$prof_id" == *[!a-zA-Z0-9_-]* ]]; then
-            json_error "Invalid profile ID"
-            exit 1
-        fi
-        if [[ -z "$prof_name" ]]; then
-            json_error "Profile name is required"
-            exit 1
-        fi
-        if [[ "$cfg_mode" == "uri" && -z "$cfg_srv" ]]; then
-            json_error "Config server URI is required"
-            exit 1
-        fi
-        if [[ "$cfg_mode" == "manual" && ( -z "$net_name" || "$net_name" == -* ) ]]; then
-            json_error "Valid network name is required"
-            exit 1
-        fi
-
-        while IFS= read -r p_url; do
-            [[ -z "$p_url" ]] && continue
-            if ! validate_connector_url "$p_url"; then
-                json_error "Invalid peer URL: $p_url"
-                exit 1
-            fi
-        done < <(jq -r '.peers[]' <<<"$normalized")
-
         store="$(read_profiles_store)"
         updated_store="$(jq -c --argjson prof "$normalized" '
             (if any(.profiles[]; .id == $prof.id) then

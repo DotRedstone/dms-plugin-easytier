@@ -2,6 +2,7 @@ import QtQuick
 import qs.Common
 import qs.DCommon.Widgets
 import "../UiText.js" as UiText
+import "../AssistantConfig.js" as AssistantConfig
 
 // [Profiles & Backend Mode Tab View]
 Column {
@@ -15,27 +16,14 @@ Column {
     property bool busy: false
     property bool connected: false
     property bool managedActive: false
-
-    // Editor state
     property bool editing: false
-    property string editId: ""
-    property string editName: ""
-    property string editConfigMode: "manual"
-    property string editConfigServer: ""
-    property string editNetworkName: ""
-    property string editNetworkSecret: ""
-    property bool editDhcp: true
-    property string editIpv4: ""
-    property string editHostname: ""
-    property var editPeers: []
-    property var editProxyCidrs: []
-    property bool editNoTun: false
 
     signal backendModeSelected(string mode)
     signal selectProfileRequested(string profileId)
     signal connectProfileRequested(string profileId)
     signal deleteProfileRequested(string profileId)
     signal saveProfileRequested(var profileObj, bool connectImmediately)
+    signal copyTomlRequested(string tomlText)
 
     spacing: Theme.spacingS
 
@@ -44,98 +32,15 @@ Column {
     }
 
     function openNewEditor() {
-        editId = "";
-        editName = "";
-        editConfigMode = "manual";
-        editConfigServer = "";
-        editNetworkName = "";
-        editNetworkSecret = "";
-        editDhcp = true;
-        editIpv4 = "";
-        editHostname = "";
-        editPeers = [];
-        editProxyCidrs = [];
-        editNoTun = false;
-        peerField.text = "";
-        cidrField.text = "";
+        profileEditor.loadNew();
         editing = true;
     }
 
     function openEditProfile(prof) {
         if (!prof)
             return;
-        editId = prof.id || "";
-        editName = prof.name || "";
-        editConfigMode = prof.configMode === "uri" ? "uri" : "manual";
-        editConfigServer = prof.configServer || "";
-        editNetworkName = prof.networkName || "";
-        editNetworkSecret = prof.networkSecret || "";
-        editDhcp = prof.dhcp !== false;
-        editIpv4 = prof.ipv4 || "";
-        editHostname = prof.hostname || "";
-        editPeers = Array.isArray(prof.peers) ? prof.peers.slice() : [];
-        editProxyCidrs = Array.isArray(prof.proxyCidrs) ? prof.proxyCidrs.slice() : [];
-        editNoTun = prof.noTun === true;
-        peerField.text = "";
-        cidrField.text = "";
+        profileEditor.loadProfile(prof);
         editing = true;
-    }
-
-    function appendTokens(currentList, rawInput) {
-        const tokens = String(rawInput || "")
-            .split(/[\s,]+/)
-            .map(s => s.trim())
-            .filter(s => s.length > 0);
-        if (tokens.length === 0)
-            return currentList;
-        const next = currentList.slice();
-        for (let i = 0; i < tokens.length; i++) {
-            if (next.indexOf(tokens[i]) < 0)
-                next.push(tokens[i]);
-        }
-        return next;
-    }
-
-    function commitPendingPeer() {
-        if (peerField.text.trim().length > 0) {
-            editPeers = appendTokens(editPeers, peerField.text);
-            peerField.text = "";
-        }
-    }
-
-    function commitPendingCidr() {
-        if (cidrField.text.trim().length > 0) {
-            editProxyCidrs = appendTokens(editProxyCidrs, cidrField.text);
-            cidrField.text = "";
-        }
-    }
-
-    function buildPayload() {
-        commitPendingPeer();
-        commitPendingCidr();
-        return {
-            id: editId,
-            name: nameField.text.trim(),
-            configMode: editConfigMode,
-            configServer: configServerField.text.trim(),
-            networkName: networkNameField.text.trim(),
-            networkSecret: networkSecretField.text,
-            dhcp: editDhcp,
-            ipv4: ipv4Field.text.trim(),
-            hostname: hostnameField.text.trim(),
-            peers: editPeers.slice(),
-            proxyCidrs: editProxyCidrs.slice(),
-            noTun: editNoTun
-        };
-    }
-
-    readonly property bool canSaveForm: {
-        const hasName = nameField.text.trim().length > 0;
-        if (!hasName)
-            return false;
-        if (editConfigMode === "uri")
-            return configServerField.text.trim().length > 0;
-        return networkNameField.text.trim().length > 0;
     }
 
     // [Backend Mode Switcher]
@@ -258,7 +163,7 @@ Column {
                 readonly property bool isSelected: modelData.id === root.activeProfileId
                 readonly property bool isRunningThis: isSelected && root.managedActive
 
-                width: parent ? parent.width : 378
+                width: parent ? parent.width : 412
                 height: 62
                 radius: Theme.cornerRadiusM
                 color: isSelected ? Theme.secondaryContainer : Theme.ccPillInactiveBg
@@ -308,17 +213,31 @@ Column {
                             elide: Text.ElideRight
                             text: {
                                 const tags = [];
-                                if (profCard.modelData.configMode === "uri") {
+                                const mode = profCard.modelData.configMode || "manual";
+                                const flags = profCard.modelData.flags || {};
+                                const isNoTun = flags.noTun === true || profCard.modelData.noTun === true;
+                                if (mode === "uri") {
                                     tags.push(root.t("tagUri"));
                                 } else {
+                                    if (mode === "standalone")
+                                        tags.push(root.t("tagStandalone"));
                                     if (profCard.modelData.networkName)
                                         tags.push(profCard.modelData.networkName);
-                                    tags.push(profCard.modelData.dhcp !== false ? root.t("tagDhcp") : (profCard.modelData.ipv4 || "Static"));
+                                    if (!isNoTun)
+                                        tags.push(profCard.modelData.dhcp !== false ? root.t("tagDhcp") : (profCard.modelData.ipv4 || "Static"));
                                     const pCount = Array.isArray(profCard.modelData.peers) ? profCard.modelData.peers.length : 0;
-                                    if (pCount > 0)
+                                    if (mode === "manual" && pCount > 0)
                                         tags.push(root.t("peersCountTag", pCount));
+                                    const cCount = Array.isArray(profCard.modelData.proxyCidrs) ? profCard.modelData.proxyCidrs.length : 0;
+                                    if (cCount > 0)
+                                        tags.push(root.t("proxyCountTag", cCount));
+                                    const pfCount = Array.isArray(profCard.modelData.portForwards) ? profCard.modelData.portForwards.length : 0;
+                                    if (pfCount > 0)
+                                        tags.push(root.t("pfCountTag", pfCount));
+                                    if (profCard.modelData.vpnPortalEnabled === true)
+                                        tags.push(root.t("tagVpn"));
                                 }
-                                if (profCard.modelData.noTun === true)
+                                if (isNoTun)
                                     tags.push(root.t("tagNoTun"));
                                 return tags.join(" • ");
                             }
@@ -339,7 +258,7 @@ Column {
                     spacing: 2
 
                     DActionButton {
-                        buttonSize: 30
+                        buttonSize: 28
                         iconSize: 17
                         iconName: profCard.isRunningThis ? "sync" : "play_arrow"
                         iconColor: Theme.primary
@@ -350,7 +269,17 @@ Column {
                     }
 
                     DActionButton {
-                        buttonSize: 30
+                        buttonSize: 28
+                        iconSize: 15
+                        iconName: "code"
+                        iconColor: Theme.surfaceVariantText
+                        backgroundColor: "transparent"
+                        tooltipText: root.t("copyToml")
+                        onClicked: root.copyTomlRequested(AssistantConfig.generateToml(profCard.modelData, false))
+                    }
+
+                    DActionButton {
+                        buttonSize: 28
                         iconSize: 16
                         iconName: "edit"
                         iconColor: Theme.surfaceText
@@ -361,7 +290,7 @@ Column {
                     }
 
                     DActionButton {
-                        buttonSize: 30
+                        buttonSize: 28
                         iconSize: 16
                         iconName: "delete_outline"
                         iconColor: Theme.error
@@ -375,378 +304,18 @@ Column {
         }
     }
 
-    // [Inline Profile Editor Card]
-    Rectangle {
+    // [Official Assistant-Style Profile Editor]
+    ProfileEditor {
+        id: profileEditor
         visible: root.editing
         width: parent.width
-        height: editorCol.implicitHeight + Theme.spacingM * 2
-        radius: Theme.cornerRadiusL
-        color: Theme.ccPillInactiveBg
-
-        Column {
-            id: editorCol
-            x: Theme.spacingM
-            y: Theme.spacingM
-            width: parent.width - Theme.spacingM * 2
-            spacing: Theme.spacingS
-
-            StyledText {
-                text: root.editId.length > 0 ? root.t("editProfile") : root.t("newProfile")
-                color: Theme.surfaceText
-                font.pixelSize: Theme.fontSizeMedium
-                font.weight: Font.Bold
-            }
-
-            // Profile Name
-            StyledText {
-                text: root.t("profileName")
-                color: Theme.surfaceVariantText
-                font.pixelSize: Theme.fontSizeSmall
-            }
-            DTextField {
-                id: nameField
-                width: parent.width
-                text: root.editName
-                placeholderText: root.t("profileNamePlaceholder")
-                showClearButton: true
-            }
-
-            // Config Mode Chips
-            DFilterChips {
-                width: parent.width
-                currentIndex: root.editConfigMode === "uri" ? 1 : 0
-                showCounts: false
-                model: [
-                    { label: root.t("authModePassword") },
-                    { label: root.t("authModeUri") }
-                ]
-                onSelectionChanged: index => {
-                    root.editConfigMode = index === 1 ? "uri" : "manual";
-                }
-            }
-
-            // URI Mode Field
-            Column {
-                visible: root.editConfigMode === "uri"
-                width: parent.width
-                spacing: Theme.spacingXS
-
-                StyledText {
-                    text: root.t("configServerUri")
-                    color: Theme.surfaceVariantText
-                    font.pixelSize: Theme.fontSizeSmall
-                }
-                DTextField {
-                    id: configServerField
-                    width: parent.width
-                    text: root.editConfigServer
-                    placeholderText: root.t("configServerPlaceholder")
-                    showClearButton: true
-                }
-            }
-
-            // Standard Mode Fields
-            Column {
-                visible: root.editConfigMode === "manual"
-                width: parent.width
-                spacing: Theme.spacingS
-
-                Column {
-                    width: parent.width
-                    spacing: Theme.spacingXS
-
-                    StyledText {
-                        text: root.t("networkName")
-                        color: Theme.surfaceVariantText
-                        font.pixelSize: Theme.fontSizeSmall
-                    }
-                    DTextField {
-                        id: networkNameField
-                        width: parent.width
-                        text: root.editNetworkName
-                        placeholderText: root.t("networkNamePlaceholder")
-                        showClearButton: true
-                    }
-                }
-
-                Column {
-                    width: parent.width
-                    spacing: Theme.spacingXS
-
-                    StyledText {
-                        text: root.t("networkSecret")
-                        color: Theme.surfaceVariantText
-                        font.pixelSize: Theme.fontSizeSmall
-                    }
-                    DTextField {
-                        id: networkSecretField
-                        width: parent.width
-                        text: root.editNetworkSecret
-                        placeholderText: root.t("networkSecretPlaceholder")
-                        echoMode: TextInput.Password
-                        showPasswordToggle: true
-                    }
-                }
-
-                // DHCP Toggle
-                DToggle {
-                    width: parent.width
-                    text: root.t("dhcpAuto")
-                    description: root.t("dhcpAutoDesc")
-                    checked: root.editDhcp
-                    onToggled: checked => {
-                        root.editDhcp = checked;
-                    }
-                }
-
-                // Static IPv4
-                Column {
-                    visible: !root.editDhcp
-                    width: parent.width
-                    spacing: Theme.spacingXS
-
-                    StyledText {
-                        text: root.t("staticIpv4")
-                        color: Theme.surfaceVariantText
-                        font.pixelSize: Theme.fontSizeSmall
-                    }
-                    DTextField {
-                        id: ipv4Field
-                        width: parent.width
-                        text: root.editIpv4
-                        placeholderText: root.t("staticIpv4Placeholder")
-                        showClearButton: true
-                    }
-                }
-
-                // Initial Peers Builder
-                Column {
-                    width: parent.width
-                    spacing: Theme.spacingXS
-
-                    StyledText {
-                        text: root.t("initialPeers")
-                        color: Theme.surfaceVariantText
-                        font.pixelSize: Theme.fontSizeSmall
-                    }
-
-                    Row {
-                        width: parent.width
-                        spacing: Theme.spacingXS
-
-                        DTextField {
-                            id: peerField
-                            width: parent.width - addPeerBtn.width - Theme.spacingXS
-                            placeholderText: root.t("peerInputPlaceholder")
-                            onAccepted: root.commitPendingPeer()
-                        }
-
-                        DActionButton {
-                            id: addPeerBtn
-                            buttonSize: 36
-                            iconSize: 18
-                            iconName: "add"
-                            iconColor: Theme.onPrimary
-                            backgroundColor: Theme.primary
-                            anchors.verticalCenter: parent.verticalCenter
-                            onClicked: root.commitPendingPeer()
-                        }
-                    }
-
-                    Flow {
-                        visible: root.editPeers.length > 0
-                        width: parent.width
-                        spacing: Theme.spacingXS
-
-                        Repeater {
-                            model: root.editPeers
-
-                            delegate: Rectangle {
-                                required property var modelData
-                                height: 24
-                                width: Math.min(editorCol.width, chipPeerRow.implicitWidth + 12)
-                                radius: 12
-                                color: Theme.secondaryContainer
-
-                                Row {
-                                    id: chipPeerRow
-                                    anchors.centerIn: parent
-                                    spacing: 4
-
-                                    StyledText {
-                                        text: modelData
-                                        color: Theme.onSecondaryContainer
-                                        font.pixelSize: Theme.fontSizeSmall - 1
-                                        elide: Text.ElideMiddle
-                                        width: Math.min(implicitWidth, editorCol.width - 36)
-                                        anchors.verticalCenter: parent.verticalCenter
-                                    }
-
-                                    DActionButton {
-                                        buttonSize: 18
-                                        iconSize: 12
-                                        iconName: "close"
-                                        iconColor: Theme.onSecondaryContainer
-                                        backgroundColor: "transparent"
-                                        anchors.verticalCenter: parent.verticalCenter
-                                        onClicked: {
-                                            root.editPeers = root.editPeers.filter(item => item !== modelData);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Subnet Proxy CIDRs Builder
-                Column {
-                    width: parent.width
-                    spacing: Theme.spacingXS
-
-                    StyledText {
-                        text: root.t("subnetProxies")
-                        color: Theme.surfaceVariantText
-                        font.pixelSize: Theme.fontSizeSmall
-                    }
-
-                    Row {
-                        width: parent.width
-                        spacing: Theme.spacingXS
-
-                        DTextField {
-                            id: cidrField
-                            width: parent.width - addCidrBtn.width - Theme.spacingXS
-                            placeholderText: root.t("cidrInputPlaceholder")
-                            onAccepted: root.commitPendingCidr()
-                        }
-
-                        DActionButton {
-                            id: addCidrBtn
-                            buttonSize: 36
-                            iconSize: 18
-                            iconName: "add"
-                            iconColor: Theme.primary
-                            backgroundColor: Theme.secondaryContainer
-                            anchors.verticalCenter: parent.verticalCenter
-                            onClicked: root.commitPendingCidr()
-                        }
-                    }
-
-                    Flow {
-                        visible: root.editProxyCidrs.length > 0
-                        width: parent.width
-                        spacing: Theme.spacingXS
-
-                        Repeater {
-                            model: root.editProxyCidrs
-
-                            delegate: Rectangle {
-                                required property var modelData
-                                height: 24
-                                width: chipCidrRow.implicitWidth + 12
-                                radius: 12
-                                color: Theme.secondaryContainer
-
-                                Row {
-                                    id: chipCidrRow
-                                    anchors.centerIn: parent
-                                    spacing: 4
-
-                                    StyledText {
-                                        text: modelData
-                                        color: Theme.onSecondaryContainer
-                                        font.pixelSize: Theme.fontSizeSmall - 1
-                                        anchors.verticalCenter: parent.verticalCenter
-                                    }
-
-                                    DActionButton {
-                                        buttonSize: 18
-                                        iconSize: 12
-                                        iconName: "close"
-                                        iconColor: Theme.onSecondaryContainer
-                                        backgroundColor: "transparent"
-                                        anchors.verticalCenter: parent.verticalCenter
-                                        onClicked: {
-                                            root.editProxyCidrs = root.editProxyCidrs.filter(item => item !== modelData);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Custom Hostname
-                Column {
-                    width: parent.width
-                    spacing: Theme.spacingXS
-
-                    StyledText {
-                        text: root.t("customHostname")
-                        color: Theme.surfaceVariantText
-                        font.pixelSize: Theme.fontSizeSmall
-                    }
-                    DTextField {
-                        id: hostnameField
-                        width: parent.width
-                        text: root.editHostname
-                        placeholderText: root.t("customHostnamePlaceholder")
-                        showClearButton: true
-                    }
-                }
-            }
-
-            // No-TUN Toggle (applies to both Standard and URI modes)
-            DToggle {
-                width: parent.width
-                text: root.t("noTunMode")
-                description: root.t("noTunModeDesc")
-                checked: root.editNoTun
-                onToggled: checked => {
-                    root.editNoTun = checked;
-                }
-            }
-
-            // Form Action Buttons
-            Row {
-                width: parent.width
-                spacing: Theme.spacingXS
-                layoutDirection: Qt.RightToLeft
-
-                DButton {
-                    buttonHeight: 34
-                    iconName: "bolt"
-                    text: root.t("saveAndConnect")
-                    enabled: root.canSaveForm && !root.busy
-                    onClicked: {
-                        const payload = root.buildPayload();
-                        root.editing = false;
-                        root.saveProfileRequested(payload, true);
-                    }
-                }
-
-                DButton {
-                    buttonHeight: 34
-                    text: root.t("save")
-                    backgroundColor: Theme.secondaryContainer
-                    textColor: Theme.onSecondaryContainer
-                    enabled: root.canSaveForm && !root.busy
-                    onClicked: {
-                        const payload = root.buildPayload();
-                        root.editing = false;
-                        root.saveProfileRequested(payload, false);
-                    }
-                }
-
-                DButton {
-                    buttonHeight: 34
-                    text: root.t("cancel")
-                    backgroundColor: "transparent"
-                    textColor: Theme.surfaceVariantText
-                    onClicked: root.editing = false
-                }
-            }
+        lang: root.lang
+        busy: root.busy
+        onCancelled: root.editing = false
+        onCopyTomlRequested: tomlText => root.copyTomlRequested(tomlText)
+        onSaveRequested: (profileObj, connectNow) => {
+            root.editing = false;
+            root.saveProfileRequested(profileObj, connectNow);
         }
     }
 }

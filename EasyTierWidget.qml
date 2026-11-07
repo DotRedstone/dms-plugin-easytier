@@ -162,6 +162,15 @@ PluginComponent {
             ToastService.showInfo(root.t("title"), root.t("copied") + ": " + text);
     }
 
+    function copyToml(tomlText) {
+        const text = String(tomlText || "").trim();
+        if (!text)
+            return;
+        Quickshell.execDetached(["dms", "cl", "copy", text]);
+        if (typeof ToastService !== "undefined")
+            ToastService.showInfo(root.t("title"), root.t("tomlCopied"));
+    }
+
     function showToast(title, msg, isErr) {
         if (typeof ToastService === "undefined")
             return;
@@ -547,7 +556,7 @@ PluginComponent {
     }
 
     // [Popout Panel]
-    popoutWidth: 420
+    popoutWidth: 456
 
     popoutContent: Component {
         PopoutComponent {
@@ -738,6 +747,7 @@ PluginComponent {
                         onConnectProfileRequested: id => root.connectProfile(id)
                         onDeleteProfileRequested: id => root.deleteProfile(id)
                         onSaveProfileRequested: (profileObj, connectNow) => root.saveProfile(profileObj, connectNow)
+                        onCopyTomlRequested: tomlText => root.copyToml(tomlText)
                     }
 
                     ConnectorsView {

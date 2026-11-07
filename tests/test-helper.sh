@@ -259,6 +259,62 @@ if command -v easytier-core >/dev/null 2>&1 && command -v easytier-cli >/dev/nul
 
     "$HELPER" profile-delete "$LIVE_ID" >/dev/null
     pass "Live managed profile start/stop and dynamic connector add/remove verified"
+
+    # [Test 6: Assistant v2 Full Advanced TOML Profile & Live Startup]
+    ADV_SAVE="$("$HELPER" profile-save '{
+      "name": "Assistant Expert Profile",
+      "configMode": "standalone",
+      "instanceName": "expert-inst",
+      "hostname": "expert-node",
+      "networkName": "expert-net",
+      "networkSecret": "EXPERT_SECRET_DO_NOT_LEAK",
+      "dhcp": false,
+      "ipv4": "10.144.144.88/24",
+      "ipv6": "fd00:144::88/64",
+      "listeners": ["tcp://127.0.0.1:29897"],
+      "mappedListeners": ["tcp://198.51.100.88:29897"],
+      "proxyCidrs": ["192.168.88.0/24"],
+      "manualRoutes": ["10.200.0.0/16"],
+      "exitNodes": ["10.144.144.1"],
+      "socks5": "127.0.0.1:29898",
+      "vpnPortalEnabled": true,
+      "vpnClientCidr": "10.144.145.0/24",
+      "vpnWireguardListen": "127.0.0.1:29900",
+      "portForwards": [
+        { "proto": "tcp", "bindAddr": "127.0.0.1:29899", "dstAddr": "10.144.144.2:8080" }
+      ],
+      "flags": {
+        "defaultProtocol": "udp",
+        "encryptionAlgorithm": "aes-256-gcm",
+        "compression": "zstd",
+        "mtu": 1360,
+        "multiThread": true,
+        "multiThreadCount": 2,
+        "noTun": true,
+        "useSmoltcp": true,
+        "latencyFirst": true,
+        "enableKcpProxy": true,
+        "privateMode": true,
+        "foreignRelayBpsLimit": "1048576"
+      },
+      "consoleLogLevel": "info"
+    }')"
+    ADV_ID="$(jq -r '.id' <<<"$ADV_SAVE")"
+    [[ -n "$ADV_ID" && "$ADV_ID" != "null" ]] || fail "Expected generated ID for advanced profile"
+
+    OUT_ADV_START="$("$HELPER" managed-start "$ADV_ID" "127.0.0.1:29895" "easytier.service" "user")"
+    [[ "$(jq -r '.rpcConnected' <<<"$OUT_ADV_START")" == "true" ]] || fail "Advanced TOML profile should start and connect RPC"
+    [[ "$(jq -r '.self.hostname' <<<"$OUT_ADV_START")" == "expert-node" ]] || fail "Expected expert-node hostname"
+    [[ "$(stat -c '%a' "$EASYTIER_DMS_RUNTIME_DIR/managed.toml")" == "600" ]] || fail "managed.toml must be mode 0600"
+    grep -q 'data_compress_algo = 2' "$EASYTIER_DMS_RUNTIME_DIR/managed.toml" || fail "Expected integer enum data_compress_algo = 2"
+    grep -q 'socks5_proxy = "socks5://127.0.0.1:29898"' "$EASYTIER_DMS_RUNTIME_DIR/managed.toml" || fail "Expected normalized socks5_proxy"
+    if grep -q "EXPERT_SECRET_DO_NOT_LEAK" <<<"$OUT_ADV_START"; then
+        fail "Expert profile secret leaked into managed-start JSON!"
+    fi
+
+    "$HELPER" managed-stop "" "127.0.0.1:29895" "easytier.service" "user" >/dev/null
+    "$HELPER" profile-delete "$ADV_ID" >/dev/null
+    pass "Assistant v2 advanced TOML rendering, 0600 permissions, and live startup verified"
 fi
 
 printf 'All tests passed.\n'
