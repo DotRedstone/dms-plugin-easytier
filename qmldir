@@ -1,0 +1,3 @@
+singleton EasyTierBus 1.0 EasyTierBus.qml
+EasyTierWidget 1.0 EasyTierWidget.qml
+EasyTierSettings 1.0 EasyTierSettings.qml
