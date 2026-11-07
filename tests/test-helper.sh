@@ -241,7 +241,7 @@ if command -v easytier-core >/dev/null 2>&1 && command -v easytier-cli >/dev/nul
     }')"
     LIVE_ID="$(jq -r '.id' <<<"$LIVE_SAVE")"
 
-    trap '"$HELPER" managed-stop "127.0.0.1:29895" >/dev/null 2>&1 || true; rm -rf "$TMP_DIR"' EXIT
+    trap '"$HELPER" managed-stop "" "127.0.0.1:29895" >/dev/null 2>&1 || true; rm -rf "$TMP_DIR"' EXIT
 
     OUT_MGD_START="$("$HELPER" managed-start "$LIVE_ID" "127.0.0.1:29895" "easytier.service" "user")"
     [[ "$(jq -r '.rpcConnected' <<<"$OUT_MGD_START")" == "true" ]] || fail "Managed start should connect RPC"

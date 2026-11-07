@@ -1,15 +1,15 @@
 {
   "id": "easytier",
   "name": "EasyTier",
-  "description": "Mesh VPN status monitor, peer topology viewer, and service controller for EasyTier",
+  "description": "Mesh VPN status monitor, profile config assistant, and service controller for EasyTier",
   "version": "0.1.0",
-  "author": "dotredstone",
+  "author": "DotRedstone",
   "type": "widget",
-  "capabilities": ["dankbar-widget", "control-center", "monitoring"],
+  "capabilities": ["dankbar-widget", "control-center", "vpn", "network", "monitoring"],
   "component": "./EasyTierWidget.qml",
-  "settings": "./EasyTierSettings.qml?v=0.1.0",
+  "settings": "./EasyTierSettings.qml",
   "icon": "hub",
   "requires_dms": ">=2.0.0",
-  "dependencies": ["easytier-cli", "jq", "systemctl"],
+  "dependencies": ["easytier-core", "easytier-cli", "jq", "systemd"],
   "permissions": ["process", "settings_read", "settings_write"]
 }

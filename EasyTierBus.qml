@@ -9,5 +9,6 @@ QtObject {
     property var profiles: []
     property string activeProfileId: ""
     property bool busy: false
+    property bool popupOpen: false
     property string lastError: ""
 }

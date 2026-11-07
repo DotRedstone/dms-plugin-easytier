@@ -29,7 +29,14 @@ PluginComponent {
     readonly property string copyField: pluginData.copyField || "ip"
     readonly property bool rightClickToggle: pluginData.rightClickToggle !== false && pluginData.rightClickToggle !== "false"
     readonly property bool showRoutes: pluginData.showRoutes !== false && pluginData.showRoutes !== "false"
-    readonly property int pollIntervalMs: Math.max(2, Math.min(60, Number(pluginData.pollInterval) || 5)) * 1000
+    readonly property int pollIntervalMs: Math.max(5, Math.min(60, Number(pluginData.pollInterval) || 5)) * 1000
+    readonly property int effectivePollMs: {
+        if (EasyTierBus.popupOpen)
+            return pollIntervalMs;
+        if (connected || backendActive)
+            return Math.max(pollIntervalMs, 15000);
+        return Math.max(pollIntervalMs, 30000);
+    }
     readonly property string serviceScope: pluginData.serviceScope === "user" ? "user" : "system"
     readonly property string serviceUnit: {
         const raw = String(pluginData.serviceUnit || "").trim();
@@ -116,12 +123,23 @@ PluginComponent {
         }
     }
 
+    function syncPopupOpen() {
+        EasyTierBus.popupOpen = EasyTierBus.instances.some(item => item && item.interactionActive);
+    }
+
     function unregisterInstance() {
         const list = EasyTierBus.instances.filter(item => item !== root);
         EasyTierBus.instances = list;
         if (EasyTierBus.primaryInstance === root) {
             EasyTierBus.primaryInstance = list.length > 0 ? list[0] : null;
         }
+        syncPopupOpen();
+    }
+
+    onInteractionActiveChanged: {
+        syncPopupOpen();
+        if (interactionActive)
+            refresh();
     }
 
     onIsLiveInstanceChanged: {
@@ -414,7 +432,7 @@ PluginComponent {
 
     Timer {
         id: pollTimer
-        interval: root.pollIntervalMs
+        interval: root.effectivePollMs
         repeat: true
         running: root.isPrimaryInstance && !root.busy
         onTriggered: root.refresh()
@@ -566,7 +584,6 @@ PluginComponent {
 
             headerText: root.t("title")
             detailsText: ""
-            showCloseButton: false
 
             function jumpToProfiles(createNew) {
                 currentTab = 1;

@@ -671,7 +671,10 @@ stop_managed_profile() {
 fetch_node_sanitized() {
     local rpc="$1"
     local raw
-    if ! raw="$("$EASYTIER_CLI_BIN" -p "$rpc" -o json node)"; then
+    if ! raw="$("$EASYTIER_CLI_BIN" -p "$rpc" -o json node 2>&1)"; then
+        if [[ "$raw" == *"no running instances found"* ]]; then
+            return 2
+        fi
         return 1
     fi
     printf '%s' "$raw" | jq -ce '{
@@ -760,12 +763,10 @@ build_status_json() {
         return 0
     fi
 
-    ensure_private_dir "$RUNTIME_DIR"
-    local node_json="" node_err="" no_instance="false" tmp_err_file="$RUNTIME_DIR/rpc.err.$$"
-    if ! node_json="$(fetch_node_sanitized "$rpc" 2>"$tmp_err_file")"; then
-        node_err="$(cat "$tmp_err_file" 2>/dev/null || true)"
-        rm -f "$tmp_err_file" 2>/dev/null || true
-        if [[ "$node_err" == *"no running instances found"* ]]; then
+    local node_json="" node_rc=0 no_instance="false"
+    node_json="$(fetch_node_sanitized "$rpc")" || node_rc=$?
+    if [[ "$node_rc" -ne 0 ]]; then
+        if [[ "$node_rc" -eq 2 ]]; then
             no_instance="true"
         fi
         jq -cn \
@@ -804,7 +805,6 @@ build_status_json() {
             }'
         return 0
     fi
-    rm -f "$tmp_err_file" 2>/dev/null || true
 
     local peers_raw routes_raw stats_raw connectors_raw
     peers_raw="$(fetch_subcommand_array "$rpc" peer)"
@@ -988,6 +988,10 @@ case "$cmd" in
         fi
         sub_op="${2:-}"
         systemctl_path="${3:-systemctl}"
+        if [[ "$systemctl_path" != /* || ! -x "$systemctl_path" || "${systemctl_path##*/}" != "systemctl" ]]; then
+            printf 'Invalid systemctl path\n' >&2
+            exit 1
+        fi
         if [[ "$sub_op" == "stop" ]]; then
             "$systemctl_path" stop "$MANAGED_UNIT" 2>/dev/null || true
             "$systemctl_path" reset-failed "$MANAGED_UNIT" 2>/dev/null || true
@@ -998,6 +1002,18 @@ case "$cmd" in
             env_file="${5:-}"
             toml_file="${6:-}"
             core_path="${7:-}"
+            if [[ "$systemd_run_path" != /* || ! -x "$systemd_run_path" || "${systemd_run_path##*/}" != "systemd-run" ]]; then
+                printf 'Invalid systemd-run path\n' >&2
+                exit 1
+            fi
+            if [[ "$core_path" != /* || ! -x "$core_path" || "${core_path##*/}" != "easytier-core" ]]; then
+                printf 'Invalid easytier-core path\n' >&2
+                exit 1
+            fi
+            if [[ ! -f "$env_file" || -L "$env_file" || ! -f "$toml_file" || -L "$toml_file" ]]; then
+                printf 'Invalid managed configuration files\n' >&2
+                exit 1
+            fi
             shift 7
             "$systemctl_path" stop "$MANAGED_UNIT" 2>/dev/null || true
             "$systemctl_path" reset-failed "$MANAGED_UNIT" 2>/dev/null || true

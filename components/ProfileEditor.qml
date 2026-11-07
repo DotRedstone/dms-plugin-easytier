@@ -171,6 +171,7 @@ Rectangle {
                 model: root.sectionTabs
 
                 delegate: StyledButton {
+                    id: secTabBtn
                     required property var modelData
                     required property int index
                     readonly property bool active: root.currentSection === index
@@ -194,15 +195,15 @@ Rectangle {
                         DIcon {
                             name: modelData.icon
                             size: 14
-                            color: parent.parent.active ? Theme.onPrimary : Theme.surfaceVariantText
+                            color: secTabBtn.active ? Theme.onPrimary : Theme.surfaceVariantText
                             anchors.verticalCenter: parent.verticalCenter
                         }
 
                         StyledText {
                             text: root.t(modelData.labelKey)
-                            color: parent.parent.active ? Theme.onPrimary : Theme.surfaceText
-                            font.pixelSize: Theme.fontSizeSmall - 1
-                            font.weight: parent.parent.active ? Font.Medium : Font.Normal
+                            color: secTabBtn.active ? Theme.onPrimary : Theme.surfaceText
+                            font.pixelSize: Theme.fontSizeXSmall
+                            font.weight: secTabBtn.active ? Font.Medium : Font.Normal
                             anchors.verticalCenter: parent.verticalCenter
                         }
                     }

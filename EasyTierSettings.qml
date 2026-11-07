@@ -110,8 +110,8 @@ PluginSettings {
         label: root.t("settingPollInterval")
         description: root.t("settingPollIntervalDesc")
         defaultValue: 5
-        minimum: 2
-        maximum: 30
+        minimum: 5
+        maximum: 60
         unit: "s"
     }
 

@@ -1,10 +1,11 @@
 import QtQuick
+import qs.Common
 
 // [Mesh Logo Canvas]
 Item {
     id: root
 
-    property color color: "#ffffff"
+    property color color: Theme.surfaceText
     property int size: 18
 
     width: size
