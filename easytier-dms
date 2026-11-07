@@ -514,6 +514,10 @@ run_service_action() {
         return $?
     fi
 
+    if "$SYSTEMCTL_BIN" --no-ask-password "$action" "$unit" 2>/dev/null; then
+        return 0
+    fi
+
     local systemctl_path
     systemctl_path="$(command -v "$SYSTEMCTL_BIN")"
     run_as_root "$systemctl_path" "$action" "$unit"
@@ -653,7 +657,11 @@ stop_managed_profile() {
         fi
         s_state="$(service_state "$MANAGED_UNIT" "system")"
         if [[ "$s_state" == "active" || "$s_state" == "activating" || "$s_state" == "failed" ]]; then
-            run_as_root "$SELF_SCRIPT" _root-managed-apply stop "$systemctl_path"
+            if "$systemctl_path" --no-ask-password stop "$MANAGED_UNIT" 2>/dev/null; then
+                "$systemctl_path" --no-ask-password reset-failed "$MANAGED_UNIT" 2>/dev/null || true
+            else
+                run_as_root "$SELF_SCRIPT" _root-managed-apply stop "$systemctl_path"
+            fi
         fi
     fi
     rm -f "$MANAGED_ENV_FILE" "$MANAGED_TOML_FILE" "$RUNTIME_DIR/easytier-panic.log" 2>/dev/null || true
