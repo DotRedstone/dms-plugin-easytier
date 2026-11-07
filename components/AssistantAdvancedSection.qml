@@ -130,7 +130,7 @@ Column {
 
         Column {
             width: Math.floor((parent.width - Theme.spacingS) / 2)
-            spacing: 4
+            spacing: Theme.spacingXS
 
             StyledText {
                 text: root.t("mtuLabel")
@@ -153,7 +153,7 @@ Column {
 
         Column {
             width: Math.floor((parent.width - Theme.spacingS) / 2)
-            spacing: 4
+            spacing: Theme.spacingXS
 
             StyledText {
                 text: root.t("threadCountLabel")
@@ -182,7 +182,7 @@ Column {
 
         Column {
             width: Math.floor((parent.width - Theme.spacingS) / 2)
-            spacing: 4
+            spacing: Theme.spacingXS
 
             StyledText {
                 text: root.t("tunDeviceName")
@@ -201,7 +201,7 @@ Column {
 
         Column {
             width: Math.floor((parent.width - Theme.spacingS) / 2)
-            spacing: 4
+            spacing: Theme.spacingXS
 
             StyledText {
                 text: root.t("tldDnsZone")
@@ -222,7 +222,7 @@ Column {
     // Relay Network Whitelist
     Column {
         width: parent.width
-        spacing: 4
+        spacing: Theme.spacingXS
 
         StyledText {
             text: root.t("relayWhitelist")
@@ -254,7 +254,7 @@ Column {
 
         Column {
             width: Math.floor((parent.width - Theme.spacingS) / 2)
-            spacing: 4
+            spacing: Theme.spacingXS
 
             StyledText {
                 width: parent.width
@@ -275,7 +275,7 @@ Column {
 
         Column {
             width: Math.floor((parent.width - Theme.spacingS) / 2)
-            spacing: 4
+            spacing: Theme.spacingXS
 
             StyledText {
                 width: parent.width
@@ -302,11 +302,11 @@ Column {
         delegate: Column {
             required property var modelData
             width: root.width
-            spacing: 6
+            spacing: Theme.spacingXS
 
             Item {
                 width: 1
-                height: 2
+                height: Theme.spacingXXS
             }
 
             StyledText {

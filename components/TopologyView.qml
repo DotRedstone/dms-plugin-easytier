@@ -85,15 +85,15 @@ Column {
 
                 Rectangle {
                     id: heroIconBox
-                    width: 42
-                    height: 42
+                    width: Theme.buttonHeightS
+                    height: Theme.buttonHeightS
                     radius: Theme.cornerRadiusM
                     color: root.connected ? Theme.primary : Theme.ccIconBoxInactiveBg
                     anchors.verticalCenter: parent.verticalCenter
 
                     EasyTierLogo {
                         anchors.centerIn: parent
-                        size: 22
+                        size: Theme.iconSizeMedium
                         color: root.connected ? Theme.onPrimary : Theme.primary
                     }
                 }
@@ -101,7 +101,7 @@ Column {
                 Column {
                     width: parent.width - heroIconBox.width - (copySelfBtn.visible ? copySelfBtn.width + Theme.spacingS : 0) - Theme.spacingM
                     anchors.verticalCenter: parent.verticalCenter
-                    spacing: 3
+                    spacing: Theme.spacingXXS
 
                     Row {
                         spacing: Theme.spacingXS
@@ -118,9 +118,9 @@ Column {
 
                         Rectangle {
                             visible: root.connected
-                            height: 18
-                            width: selfBadgeLabel.implicitWidth + 10
-                            radius: 9
+                            height: selfBadgeLabel.implicitHeight + Theme.spacingXS
+                            width: selfBadgeLabel.implicitWidth + Theme.spacingS
+                            radius: Theme.cornerRadiusFull
                             color: Theme.secondaryContainer
                             anchors.verticalCenter: parent.verticalCenter
 
@@ -165,8 +165,8 @@ Column {
                 DActionButton {
                     id: copySelfBtn
                     visible: root.connected && root.selfNode !== null && String(root.selfNode.ipv4 || "").length > 0
-                    buttonSize: 30
-                    iconSize: 16
+                    buttonSize: Theme.buttonHeightXXS
+                    iconSize: Theme.iconSizeSmall
                     iconName: "content_copy"
                     iconColor: Theme.surfaceText
                     backgroundColor: "transparent"
@@ -190,9 +190,9 @@ Column {
 
                 StyledButton {
                     id: modeChip
-                    height: 22
-                    width: modeChipRow.implicitWidth + 14
-                    radius: 11
+                    height: modeChipRow.implicitHeight + Theme.spacingXS * 2
+                    width: modeChipRow.implicitWidth + Theme.spacingM
+                    radius: Theme.cornerRadiusFull
                     color: Theme.secondaryContainer
                     anchors.verticalCenter: parent.verticalCenter
                     onClicked: root.openProfilesTab(false)
@@ -200,11 +200,11 @@ Column {
                     Row {
                         id: modeChipRow
                         anchors.centerIn: parent
-                        spacing: 4
+                        spacing: Theme.spacingXS
 
                         DIcon {
                             name: root.backendMode === "managed" ? "tune" : "dns"
-                            size: 13
+                            size: Theme.iconSizeSmall
                             color: Theme.onSecondaryContainer
                             anchors.verticalCenter: parent.verticalCenter
                         }
@@ -268,7 +268,7 @@ Column {
     Rectangle {
         visible: root.connected && root.filteredPeers.length === 0
         width: parent.width
-        height: 46
+        height: Theme.buttonHeightS + Theme.spacingXS
         radius: Theme.cornerRadiusM
         color: Theme.ccPillInactiveBg
 
@@ -332,7 +332,7 @@ Column {
                     x: Theme.spacingM
                     y: Theme.spacingS
                     width: parent.width - Theme.spacingM * 2
-                    spacing: 2
+                    spacing: Theme.spacingXXS
 
                     StyledText {
                         width: parent.width

@@ -16,7 +16,7 @@ Column {
 
     signal valuesUpdated(var nextValues)
 
-    spacing: 4
+    spacing: Theme.spacingXS
     opacity: fieldEnabled ? 1.0 : 0.48
 
     function appendItems(rawList) {
@@ -75,8 +75,8 @@ Column {
 
         DActionButton {
             id: addBtn
-            buttonSize: 36
-            iconSize: 18
+            buttonSize: Theme.buttonHeightXS + Theme.spacingXS
+            iconSize: Theme.iconSizeSmall
             iconName: "add"
             iconColor: inputField.text.trim().length > 0 ? Theme.onPrimary : Theme.surfaceVariantText
             backgroundColor: inputField.text.trim().length > 0 ? Theme.primary : Theme.ccIconBoxInactiveBg
@@ -88,9 +88,9 @@ Column {
 
     StyledButton {
         visible: root.presetLabel.length > 0 && Array.isArray(root.presetValues) && root.presetValues.length > 0
-        height: 24
-        width: presetText.implicitWidth + 16
-        radius: 12
+        height: Theme.buttonHeightXXS - Theme.spacingXS
+        width: presetText.implicitWidth + Theme.spacingL
+        radius: Theme.cornerRadiusFull
         color: Theme.secondaryContainer
         enabled: root.fieldEnabled
         onClicked: root.appendItems(root.presetValues)
@@ -108,25 +108,25 @@ Column {
     Flow {
         visible: Array.isArray(root.values) && root.values.length > 0
         width: parent.width
-        spacing: 6
+        spacing: Theme.spacingXS
 
         Repeater {
             model: Array.isArray(root.values) ? root.values : []
 
             delegate: Rectangle {
-                height: 24
-                width: Math.min(root.width, chipRow.implicitWidth + 14)
-                radius: 12
+                height: Theme.buttonHeightXXS
+                width: Math.min(root.width, chipRow.implicitWidth + Theme.spacingM)
+                radius: Theme.cornerRadiusFull
                 color: Theme.secondaryContainer
 
                 Row {
                     id: chipRow
                     anchors.centerIn: parent
-                    spacing: 4
+                    spacing: Theme.spacingXS
 
                     StyledText {
                         text: String(modelData)
-                        width: Math.min(implicitWidth, root.width - 42)
+                        width: Math.min(implicitWidth, root.width - Theme.buttonHeightS)
                         elide: Text.ElideMiddle
                         color: Theme.onSecondaryContainer
                         font.pixelSize: Theme.fontSizeSmall - 1
@@ -134,8 +134,8 @@ Column {
                     }
 
                     DActionButton {
-                        buttonSize: 18
-                        iconSize: 12
+                        buttonSize: Theme.buttonHeightXXS - Theme.spacingXS
+                        iconSize: Theme.iconSizeSmall
                         iconName: "close"
                         iconColor: Theme.onSecondaryContainer
                         backgroundColor: "transparent"

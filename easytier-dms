@@ -14,14 +14,11 @@ PROFILES_FILE="$CONFIG_DIR/profiles.json"
 RUNTIME_DIR="${EASYTIER_DMS_RUNTIME_DIR:-${XDG_RUNTIME_DIR:-/tmp/easytier-dms-$(id -u)}/easytier-dms}"
 MANAGED_ENV_FILE="$RUNTIME_DIR/managed.env"
 MANAGED_TOML_FILE="$RUNTIME_DIR/managed.toml"
-ROOT_RUNTIME_DIR="/run/easytier-dms"
 MANAGED_UNIT="dms-easytier-managed.service"
 
 DEFAULT_RPC="127.0.0.1:15888"
 DEFAULT_UNIT="easytier.service"
 DEFAULT_SCOPE="system"
-
-SELF_SCRIPT="$(readlink -f "${BASH_SOURCE[0]}")"
 
 # [Error Helpers]
 json_error() {
@@ -293,13 +290,20 @@ validate_normalized_profile() {
 
 render_profile_toml() {
     local norm="$1"
-    printf '%s' "$norm" | jq -r '
+    local vpn_v2="false"
+    if command -v "$EASYTIER_CORE_BIN" >/dev/null 2>&1 && "$EASYTIER_CORE_BIN" --help 2>&1 | grep -q -- '--vpn-portal-client'; then
+        vpn_v2="true"
+    fi
+    printf '%s' "$norm" | jq -r --arg vpn_v2 "$vpn_v2" '
         def socks_norm($s):
             if ($s | length) == 0 then ""
             elif ($s | startswith("socks5://")) then $s
             elif ($s | test("^[0-9]+$")) then ("socks5://0.0.0.0:" + $s)
             elif ($s | contains("://") | not) then ("socks5://" + $s)
             else $s end;
+
+        def client_vip($cidr):
+            ($cidr | sub("\\.0/"; ".1/"));
 
         [
             (if (.instanceName | length) > 0 and .instanceName != "default" then "instance_name = \(.instanceName | @json)" else empty end),
@@ -325,9 +329,21 @@ render_profile_toml() {
             (.proxyCidrs[] | "", "[[proxy_network]]", "cidr = \(. | @json)"),
             (
                 if .vpnPortalEnabled then
-                    "", "[vpn_portal_config]",
-                    "client_cidr = \(.vpnClientCidr | @json)",
-                    "wireguard_listen = \(.vpnWireguardListen | @json)"
+                    if $vpn_v2 == "true" then
+                        if (.flags.noTun | not) then
+                            "", "[vpn_portal_config]",
+                            "enabled = true",
+                            "wireguard_listen = \(.vpnWireguardListen | @json)",
+                            "", "[[vpn_portal_config.clients]]",
+                            "name = \"default\"",
+                            "virtual_ip = \(client_vip(.vpnClientCidr) | @json)",
+                            "groups = []"
+                        else empty end
+                    else
+                        "", "[vpn_portal_config]",
+                        "client_cidr = \(.vpnClientCidr | @json)",
+                        "wireguard_listen = \(.vpnWireguardListen | @json)"
+                    end
                 else empty end
             ),
             (
@@ -482,6 +498,43 @@ managed_unit_info() {
     fi
 }
 
+resolve_root_binary() {
+    local expected_name="$1"
+    local candidate=""
+    local p
+    for p in "/usr/bin/$expected_name" "/bin/$expected_name" "/run/current-system/sw/bin/$expected_name" "/usr/local/bin/$expected_name"; do
+        if [[ -x "$p" ]]; then
+            candidate="$p"
+            break
+        fi
+    done
+    if [[ -z "$candidate" ]]; then
+        candidate="$(command -v "$expected_name" 2>/dev/null || true)"
+    fi
+    if [[ -z "$candidate" || "$candidate" != /* ]]; then
+        printf 'Executable %s not found\n' "$expected_name" >&2
+        return 1
+    fi
+    local real_bin real_dir bin_stat dir_stat bin_uid bin_perm dir_uid dir_perm
+    real_bin="$(readlink -f "$candidate")"
+    if [[ -z "$real_bin" || ! -f "$real_bin" || ! -x "$real_bin" ]]; then
+        printf 'Invalid executable path for %s\n' "$expected_name" >&2
+        return 1
+    fi
+    real_dir="$(dirname "$real_bin")"
+    bin_stat="$(stat -L -c '%u %a' "$real_bin" 2>/dev/null || true)"
+    dir_stat="$(stat -L -c '%u %a' "$real_dir" 2>/dev/null || true)"
+    bin_uid="${bin_stat%% *}"
+    bin_perm="${bin_stat#* }"
+    dir_uid="${dir_stat%% *}"
+    dir_perm="${dir_stat#* }"
+    if [[ "$bin_uid" != "0" || "$dir_uid" != "0" ]] || (( (8#$bin_perm & 8#022) != 0 )) || (( (8#$dir_perm & 8#022) != 0 )); then
+        printf 'Refusing to elevate non-root-owned or writable binary %s (%s)\n' "$expected_name" "$real_bin" >&2
+        return 1
+    fi
+    printf '%s\n' "$real_bin"
+}
+
 run_as_root() {
     if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
         "$@"
@@ -518,9 +571,9 @@ run_service_action() {
         return 0
     fi
 
-    local systemctl_path
-    systemctl_path="$(command -v "$SYSTEMCTL_BIN")"
-    run_as_root "$systemctl_path" "$action" "$unit"
+    local systemctl_root_bin
+    systemctl_root_bin="$(resolve_root_binary "systemctl")" || return 1
+    run_as_root "$systemctl_root_bin" "$action" "$unit"
 }
 
 # [Managed Profile Runner]
@@ -609,12 +662,7 @@ start_managed_profile() {
             return 1
         fi
         rm -f "$RUNTIME_DIR/easytier-panic.log" 2>/dev/null || true
-
-        if [[ "$no_tun" == "true" ]]; then
-            core_args+=("-c" "$MANAGED_TOML_FILE")
-        else
-            core_args+=("-c" "$ROOT_RUNTIME_DIR/managed.toml")
-        fi
+        core_args+=("-c" "$MANAGED_TOML_FILE")
     fi
 
     mv -f "$tmp_env" "$MANAGED_ENV_FILE"
@@ -623,16 +671,16 @@ start_managed_profile() {
     "$SYSTEMCTL_BIN" --user stop "$MANAGED_UNIT" 2>/dev/null || true
     "$SYSTEMCTL_BIN" --user reset-failed "$MANAGED_UNIT" 2>/dev/null || true
 
-    local core_path systemd_run_path systemctl_path
-    core_path="$(command -v "$EASYTIER_CORE_BIN")"
-    systemd_run_path="$(command -v "$SYSTEMD_RUN_BIN")"
-    systemctl_path="$(command -v "$SYSTEMCTL_BIN")"
-
     if [[ "$no_tun" == "true" ]]; then
-        local sys_state
+        local sys_state systemctl_root_bin core_path systemd_run_path
+        core_path="$(command -v "$EASYTIER_CORE_BIN")"
+        systemd_run_path="$(command -v "$SYSTEMD_RUN_BIN")"
         sys_state="$(service_state "$MANAGED_UNIT" "system")"
-        if [[ "$sys_state" == "active" || "$sys_state" == "activating" ]]; then
-            run_as_root "$SELF_SCRIPT" _root-managed-apply stop "$systemctl_path" || true
+        if [[ "$sys_state" == "active" || "$sys_state" == "activating" || "$sys_state" == "failed" ]]; then
+            if systemctl_root_bin="$(resolve_root_binary "systemctl" 2>/dev/null)"; then
+                run_as_root "$systemctl_root_bin" stop "$MANAGED_UNIT" 2>/dev/null || true
+                run_as_root "$systemctl_root_bin" reset-failed "$MANAGED_UNIT" 2>/dev/null || true
+            fi
         fi
         "$systemd_run_path" --user \
             --unit="$MANAGED_UNIT" \
@@ -642,13 +690,32 @@ start_managed_profile() {
             --property="EnvironmentFile=$MANAGED_ENV_FILE" \
             "$core_path" "${core_args[@]}" >/dev/null
     else
-        run_as_root "$SELF_SCRIPT" _root-managed-apply start "$systemctl_path" "$systemd_run_path" "$MANAGED_ENV_FILE" "$MANAGED_TOML_FILE" "$core_path" "${core_args[@]}"
+        local systemctl_root_bin systemd_run_root_bin core_root_bin sys_state
+        systemctl_root_bin="$(resolve_root_binary "systemctl")" || return 1
+        systemd_run_root_bin="$(resolve_root_binary "systemd-run")" || return 1
+        core_root_bin="$(resolve_root_binary "easytier-core")" || return 1
+        sys_state="$(service_state "$MANAGED_UNIT" "system")"
+        if [[ "$sys_state" == "active" || "$sys_state" == "activating" || "$sys_state" == "failed" ]]; then
+            run_as_root "$systemctl_root_bin" stop "$MANAGED_UNIT" 2>/dev/null || true
+            run_as_root "$systemctl_root_bin" reset-failed "$MANAGED_UNIT" 2>/dev/null || true
+        fi
+        run_as_root "$systemd_run_root_bin" \
+            --unit="$MANAGED_UNIT" \
+            --collect \
+            --property="User=$(id -un)" \
+            --property="Group=$(id -gn)" \
+            --property=Restart=on-failure \
+            --property=RestartSec=3s \
+            --property="CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE" \
+            --property="AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE" \
+            --property="EnvironmentFile=$MANAGED_ENV_FILE" \
+            "$core_root_bin" "${core_args[@]}" >/dev/null
     fi
 }
 
 stop_managed_profile() {
     if command -v "$SYSTEMCTL_BIN" >/dev/null 2>&1; then
-        local u_state s_state systemctl_path
+        local u_state s_state systemctl_path systemctl_root_bin
         systemctl_path="$(command -v "$SYSTEMCTL_BIN")"
         u_state="$(service_state "$MANAGED_UNIT" "user")"
         if [[ "$u_state" == "active" || "$u_state" == "activating" || "$u_state" == "failed" ]]; then
@@ -659,8 +726,9 @@ stop_managed_profile() {
         if [[ "$s_state" == "active" || "$s_state" == "activating" || "$s_state" == "failed" ]]; then
             if "$systemctl_path" --no-ask-password stop "$MANAGED_UNIT" 2>/dev/null; then
                 "$systemctl_path" --no-ask-password reset-failed "$MANAGED_UNIT" 2>/dev/null || true
-            else
-                run_as_root "$SELF_SCRIPT" _root-managed-apply stop "$systemctl_path"
+            elif systemctl_root_bin="$(resolve_root_binary "systemctl")"; then
+                run_as_root "$systemctl_root_bin" stop "$MANAGED_UNIT" 2>/dev/null || true
+                run_as_root "$systemctl_root_bin" reset-failed "$MANAGED_UNIT" 2>/dev/null || true
             fi
         fi
     fi
@@ -981,62 +1049,6 @@ wait_for_rpc() {
 cmd="${1:-status}"
 
 case "$cmd" in
-    _root-managed-apply)
-        if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
-            printf 'Root privileges required\n' >&2
-            exit 1
-        fi
-        sub_op="${2:-}"
-        systemctl_path="${3:-systemctl}"
-        if [[ "$systemctl_path" != /* || ! -x "$systemctl_path" || "${systemctl_path##*/}" != "systemctl" ]]; then
-            printf 'Invalid systemctl path\n' >&2
-            exit 1
-        fi
-        if [[ "$sub_op" == "stop" ]]; then
-            "$systemctl_path" stop "$MANAGED_UNIT" 2>/dev/null || true
-            "$systemctl_path" reset-failed "$MANAGED_UNIT" 2>/dev/null || true
-            rm -rf "$ROOT_RUNTIME_DIR" 2>/dev/null || true
-            exit 0
-        elif [[ "$sub_op" == "start" ]]; then
-            systemd_run_path="${4:-systemd-run}"
-            env_file="${5:-}"
-            toml_file="${6:-}"
-            core_path="${7:-}"
-            if [[ "$systemd_run_path" != /* || ! -x "$systemd_run_path" || "${systemd_run_path##*/}" != "systemd-run" ]]; then
-                printf 'Invalid systemd-run path\n' >&2
-                exit 1
-            fi
-            if [[ "$core_path" != /* || ! -x "$core_path" || "${core_path##*/}" != "easytier-core" ]]; then
-                printf 'Invalid easytier-core path\n' >&2
-                exit 1
-            fi
-            if [[ ! -f "$env_file" || -L "$env_file" || ! -f "$toml_file" || -L "$toml_file" ]]; then
-                printf 'Invalid managed configuration files\n' >&2
-                exit 1
-            fi
-            shift 7
-            "$systemctl_path" stop "$MANAGED_UNIT" 2>/dev/null || true
-            "$systemctl_path" reset-failed "$MANAGED_UNIT" 2>/dev/null || true
-            mkdir -p "$ROOT_RUNTIME_DIR"
-            chmod 700 "$ROOT_RUNTIME_DIR"
-            install -m 600 "$env_file" "$ROOT_RUNTIME_DIR/managed.env"
-            install -m 600 "$toml_file" "$ROOT_RUNTIME_DIR/managed.toml"
-            "$systemd_run_path" \
-                --unit="$MANAGED_UNIT" \
-                --collect \
-                --property=Restart=on-failure \
-                --property=RestartSec=3s \
-                --property="CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE" \
-                --property="AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE" \
-                --property="EnvironmentFile=$ROOT_RUNTIME_DIR/managed.env" \
-                "$core_path" "$@" >/dev/null
-            exit 0
-        else
-            printf 'Invalid internal sub-operation\n' >&2
-            exit 1
-        fi
-        ;;
-
     status)
         rpc="${2:-$DEFAULT_RPC}"
         raw_unit="${3:-$DEFAULT_UNIT}"
@@ -1177,6 +1189,13 @@ case "$cmd" in
 
     profile-save)
         raw_profile="${2:-}"
+        if [[ -z "$raw_profile" || "$raw_profile" == "-" ]]; then
+            if [[ ! -t 0 ]]; then
+                raw_profile="$(cat)"
+            else
+                raw_profile=""
+            fi
+        fi
         if [[ -z "$raw_profile" ]]; then
             json_error "Missing profile JSON payload"
             exit 1

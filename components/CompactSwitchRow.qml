@@ -13,14 +13,14 @@ Rectangle {
 
     signal toggled(bool checked)
 
-    height: Math.max(38, textCol.implicitHeight + Theme.spacingS * 2)
+    height: Math.max(Theme.buttonHeightS, textCol.implicitHeight + Theme.spacingS * 2)
     radius: Theme.cornerRadiusM
     color: Theme.ccIconBoxInactiveBg
     opacity: rowEnabled ? 1.0 : 0.48
 
     Row {
         anchors.fill: parent
-        anchors.leftMargin: Theme.spacingS + 2
+        anchors.leftMargin: Theme.spacingS + Theme.spacingXXS
         anchors.rightMargin: Theme.spacingS
         spacing: Theme.spacingS
 
@@ -28,7 +28,7 @@ Rectangle {
             id: textCol
             width: parent.width - switchCtrl.width - Theme.spacingS
             anchors.verticalCenter: parent.verticalCenter
-            spacing: 2
+            spacing: Theme.spacingXXS
 
             StyledText {
                 width: parent.width

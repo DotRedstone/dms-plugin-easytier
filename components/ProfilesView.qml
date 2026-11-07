@@ -104,7 +104,7 @@ Column {
     Item {
         visible: !root.editing && root.backendMode === "managed"
         width: parent.width
-        height: 32
+        height: Theme.buttonHeightXS
 
         StyledText {
             anchors.left: parent.left
@@ -119,7 +119,7 @@ Column {
         DButton {
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
-            buttonHeight: 30
+            buttonHeight: Theme.buttonHeightXXS
             iconName: "add"
             text: root.t("newProfile")
             enabled: !root.busy
@@ -164,7 +164,7 @@ Column {
                 readonly property bool isRunningThis: isSelected && root.managedActive
 
                 width: parent ? parent.width : 412
-                height: 62
+                height: Theme.buttonHeightM + Theme.spacingXS
                 radius: Theme.cornerRadiusM
                 color: isSelected ? Theme.secondaryContainer : Theme.ccPillInactiveBg
                 border.width: isRunningThis ? 1.5 : 0
@@ -186,7 +186,7 @@ Column {
                         anchors.leftMargin: Theme.spacingM
                         anchors.verticalCenter: parent.verticalCenter
                         name: profCard.isSelected ? "radio_button_checked" : "radio_button_unchecked"
-                        size: 18
+                        size: Theme.iconSizeSmall
                         color: profCard.isSelected ? Theme.primary : Theme.surfaceVariantText
                     }
 
@@ -195,7 +195,7 @@ Column {
                         anchors.leftMargin: Theme.spacingS
                         anchors.right: parent.right
                         anchors.verticalCenter: parent.verticalCenter
-                        spacing: 2
+                        spacing: Theme.spacingXXS
 
                         StyledText {
                             width: parent.width
@@ -255,11 +255,11 @@ Column {
                     anchors.right: parent.right
                     anchors.rightMargin: Theme.spacingS
                     anchors.verticalCenter: parent.verticalCenter
-                    spacing: 2
+                    spacing: Theme.spacingXXS
 
                     DActionButton {
-                        buttonSize: 28
-                        iconSize: 17
+                        buttonSize: Theme.buttonHeightXXS
+                        iconSize: Theme.iconSizeSmall
                         iconName: profCard.isRunningThis ? "sync" : "play_arrow"
                         iconColor: Theme.primary
                         backgroundColor: "transparent"
@@ -269,8 +269,8 @@ Column {
                     }
 
                     DActionButton {
-                        buttonSize: 28
-                        iconSize: 15
+                        buttonSize: Theme.buttonHeightXXS
+                        iconSize: Theme.iconSizeSmall
                         iconName: "code"
                         iconColor: Theme.surfaceVariantText
                         backgroundColor: "transparent"
@@ -279,8 +279,8 @@ Column {
                     }
 
                     DActionButton {
-                        buttonSize: 28
-                        iconSize: 16
+                        buttonSize: Theme.buttonHeightXXS
+                        iconSize: Theme.iconSizeSmall
                         iconName: "edit"
                         iconColor: Theme.surfaceText
                         backgroundColor: "transparent"
@@ -290,8 +290,8 @@ Column {
                     }
 
                     DActionButton {
-                        buttonSize: 28
-                        iconSize: 16
+                        buttonSize: Theme.buttonHeightXXS
+                        iconSize: Theme.iconSizeSmall
                         iconName: "delete_outline"
                         iconColor: Theme.error
                         backgroundColor: "transparent"

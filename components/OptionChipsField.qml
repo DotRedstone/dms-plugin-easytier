@@ -13,7 +13,7 @@ Column {
 
     signal valueSelected(string value)
 
-    spacing: 4
+    spacing: Theme.spacingXS
     opacity: fieldEnabled ? 1.0 : 0.48
 
     StyledText {
@@ -27,16 +27,16 @@ Column {
 
     Flow {
         width: parent.width
-        spacing: 6
+        spacing: Theme.spacingXS
 
         Repeater {
             model: Array.isArray(root.options) ? root.options : []
 
             delegate: StyledButton {
                 readonly property bool selected: String(modelData.value) === root.currentValue
-                height: 28
-                width: optText.implicitWidth + 18
-                radius: 14
+                height: Theme.buttonHeightXXS
+                width: optText.implicitWidth + Theme.spacingL
+                radius: Theme.cornerRadiusFull
                 color: selected ? Theme.primary : Theme.ccIconBoxInactiveBg
                 enabled: root.fieldEnabled
                 onClicked: {

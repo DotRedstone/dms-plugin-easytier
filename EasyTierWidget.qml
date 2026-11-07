@@ -361,31 +361,12 @@ PluginComponent {
     }
 
     function saveProfile(profileObj, connectImmediately) {
-        Proc.runCommand(
-            "easytier.profileSave",
-            [helper, "profile-save", JSON.stringify(profileObj)],
-            (output, exitCode) => {
-                let parsed = null;
-                try {
-                    parsed = JSON.parse(output);
-                } catch (e) {}
-                if (exitCode === 0 && parsed && parsed.ok === true) {
-                    EasyTierBus.profiles = Array.isArray(parsed.profiles) ? parsed.profiles : [];
-                    EasyTierBus.activeProfileId = parsed.id || parsed.activeProfileId || "";
-                    showToast(root.t("title"), root.t("profileSaved"), false);
-                    if (connectImmediately && parsed.id) {
-                        connectProfile(parsed.id);
-                    } else {
-                        refresh();
-                    }
-                } else {
-                    const errMsg = (parsed && parsed.error) ? String(parsed.error) : root.t("controlFailed");
-                    showToast(root.t("title"), errMsg, true);
-                }
-            },
-            0,
-            5000
-        );
+        if (profileSaveProcess.running)
+            return;
+        profileSaveProcess.pendingPayload = JSON.stringify(profileObj);
+        profileSaveProcess.connectImmediately = connectImmediately === true;
+        profileSaveProcess.stdinEnabled = true;
+        profileSaveProcess.running = true;
     }
 
     function deleteProfile(profileId) {
@@ -421,6 +402,43 @@ PluginComponent {
             [helper, "connector-remove", url, effectiveRpcPortal, serviceUnit, serviceScope],
             () => showToast(root.t("title"), root.t("connectorRemoved") + ": " + url, false)
         );
+    }
+
+    Process {
+        id: profileSaveProcess
+        property string pendingPayload: ""
+        property bool connectImmediately: false
+        command: [root.helper, "profile-save", "-"]
+        stdinEnabled: true
+
+        onStarted: {
+            write(pendingPayload);
+            stdinEnabled = false;
+        }
+
+        stdout: StdioCollector {
+            id: profileSaveStdout
+        }
+
+        onExited: (exitCode, exitStatus) => {
+            let parsed = null;
+            try {
+                parsed = JSON.parse(profileSaveStdout.text);
+            } catch (e) {}
+            if (exitCode === 0 && parsed && parsed.ok === true) {
+                EasyTierBus.profiles = Array.isArray(parsed.profiles) ? parsed.profiles : [];
+                EasyTierBus.activeProfileId = parsed.id || parsed.activeProfileId || "";
+                root.showToast(root.t("title"), root.t("profileSaved"), false);
+                if (connectImmediately && parsed.id) {
+                    root.connectProfile(parsed.id);
+                } else {
+                    root.refresh();
+                }
+            } else {
+                const errMsg = (parsed && parsed.error) ? String(parsed.error) : root.t("controlFailed");
+                root.showToast(root.t("title"), errMsg, true);
+            }
+        }
     }
 
     // [Timers]
@@ -645,8 +663,8 @@ PluginComponent {
                     }
 
                     DActionButton {
-                        buttonSize: 32
-                        iconSize: 18
+                        buttonSize: Theme.buttonHeightXS
+                        iconSize: Theme.iconSizeSmall
                         iconName: "restart_alt"
                         iconColor: Theme.primary
                         backgroundColor: Theme.ccPillInactiveBg
@@ -656,8 +674,8 @@ PluginComponent {
                     }
 
                     DActionButton {
-                        buttonSize: 32
-                        iconSize: 18
+                        buttonSize: Theme.buttonHeightXS
+                        iconSize: Theme.iconSizeSmall
                         iconName: "refresh"
                         iconColor: Theme.primary
                         backgroundColor: Theme.ccPillInactiveBg
@@ -674,7 +692,7 @@ PluginComponent {
             DTabBar {
                 width: parent.width
                 currentIndex: popup.currentTab
-                tabHeight: 40
+                tabHeight: Theme.buttonHeightS
                 spacing: Theme.spacingXS
                 model: [
                     { icon: "hub", text: root.t("tabTopology") },

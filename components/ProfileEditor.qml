@@ -95,7 +95,7 @@ Rectangle {
         // [Editor Header]
         Item {
             width: parent.width
-            height: 30
+            height: Theme.buttonHeightXXS
 
             StyledText {
                 anchors.left: parent.left
@@ -109,11 +109,11 @@ Rectangle {
             Row {
                 anchors.right: parent.right
                 anchors.verticalCenter: parent.verticalCenter
-                spacing: 4
+                spacing: Theme.spacingXS
 
                 DActionButton {
-                    buttonSize: 28
-                    iconSize: 16
+                    buttonSize: Theme.buttonHeightXXS
+                    iconSize: Theme.iconSizeSmall
                     iconName: "restart_alt"
                     iconColor: Theme.surfaceVariantText
                     backgroundColor: "transparent"
@@ -129,8 +129,8 @@ Rectangle {
                 }
 
                 DActionButton {
-                    buttonSize: 28
-                    iconSize: 16
+                    buttonSize: Theme.buttonHeightXXS
+                    iconSize: Theme.iconSizeSmall
                     iconName: "close"
                     iconColor: Theme.surfaceVariantText
                     backgroundColor: "transparent"
@@ -143,7 +143,7 @@ Rectangle {
         // [Profile Name]
         Column {
             width: parent.width
-            spacing: 4
+            spacing: Theme.spacingXS
 
             StyledText {
                 text: root.t("profileName")
@@ -165,7 +165,7 @@ Rectangle {
         Grid {
             width: parent.width
             columns: 3
-            spacing: 6
+            spacing: Theme.spacingXS
 
             Repeater {
                 model: root.sectionTabs
@@ -177,8 +177,8 @@ Rectangle {
                     readonly property bool active: root.currentSection === index
                     readonly property bool tabAllowed: modelData.allowInUri || !root.isUriMode
 
-                    width: Math.floor((editorCol.width - 12) / 3)
-                    height: 32
+                    width: Math.floor((editorCol.width - Theme.spacingXS * 2) / 3)
+                    height: Theme.buttonHeightXS
                     radius: Theme.cornerRadiusM
                     color: active ? Theme.primary : Theme.ccIconBoxInactiveBg
                     opacity: tabAllowed ? 1.0 : 0.4
@@ -190,11 +190,11 @@ Rectangle {
 
                     Row {
                         anchors.centerIn: parent
-                        spacing: 4
+                        spacing: Theme.spacingXS
 
                         DIcon {
                             name: modelData.icon
-                            size: 14
+                            size: Theme.iconSizeSmall
                             color: secTabBtn.active ? Theme.onPrimary : Theme.surfaceVariantText
                             anchors.verticalCenter: parent.verticalCenter
                         }
@@ -250,7 +250,7 @@ Rectangle {
 
                 Column {
                     width: parent.width
-                    spacing: 4
+                    spacing: Theme.spacingXS
 
                     StyledText {
                         text: root.t("configServerUri")
@@ -270,7 +270,7 @@ Rectangle {
 
                 Column {
                     width: parent.width
-                    spacing: 4
+                    spacing: Theme.spacingXS
 
                     StyledText {
                         text: root.t("machineIdLabel")
@@ -312,7 +312,7 @@ Rectangle {
                 // Network Name + Shuffle
                 Column {
                     width: parent.width
-                    spacing: 4
+                    spacing: Theme.spacingXS
 
                     StyledText {
                         text: root.t("networkNameLabel")
@@ -335,8 +335,8 @@ Rectangle {
 
                         DActionButton {
                             id: randNetBtn
-                            buttonSize: 36
-                            iconSize: 18
+                            buttonSize: Theme.buttonHeightXS + Theme.spacingXS
+                            iconSize: Theme.iconSizeSmall
                             iconName: "shuffle"
                             iconColor: Theme.primary
                             backgroundColor: Theme.ccIconBoxInactiveBg
@@ -350,7 +350,7 @@ Rectangle {
                 // Network Secret + Show/Hide + Shuffle
                 Column {
                     width: parent.width
-                    spacing: 4
+                    spacing: Theme.spacingXS
 
                     StyledText {
                         text: root.t("networkSecretLabel")
@@ -375,8 +375,8 @@ Rectangle {
 
                         DActionButton {
                             id: randSecBtn
-                            buttonSize: 36
-                            iconSize: 18
+                            buttonSize: Theme.buttonHeightXS + Theme.spacingXS
+                            iconSize: Theme.iconSizeSmall
                             iconName: "shuffle"
                             iconColor: Theme.primary
                             backgroundColor: Theme.ccIconBoxInactiveBg
@@ -394,7 +394,7 @@ Rectangle {
 
                     Column {
                         width: Math.floor((parent.width - Theme.spacingS) / 2)
-                        spacing: 4
+                        spacing: Theme.spacingXS
 
                         StyledText {
                             text: root.t("instanceNameLabel")
@@ -405,10 +405,10 @@ Rectangle {
 
                         Row {
                             width: parent.width
-                            spacing: 4
+                            spacing: Theme.spacingXS
 
                             SyncedTextField {
-                                width: parent.width - randInstBtn.width - 4
+                                width: parent.width - randInstBtn.width - Theme.spacingXS
                                 value: root.draft.instanceName || ""
                                 placeholderText: root.t("instanceNamePlaceholder")
                                 anchors.verticalCenter: parent.verticalCenter
@@ -417,8 +417,8 @@ Rectangle {
 
                             DActionButton {
                                 id: randInstBtn
-                                buttonSize: 34
-                                iconSize: 16
+                                buttonSize: Theme.buttonHeightXS
+                                iconSize: Theme.iconSizeSmall
                                 iconName: "shuffle"
                                 iconColor: Theme.primary
                                 backgroundColor: Theme.ccIconBoxInactiveBg
@@ -431,7 +431,7 @@ Rectangle {
 
                     Column {
                         width: Math.floor((parent.width - Theme.spacingS) / 2)
-                        spacing: 4
+                        spacing: Theme.spacingXS
 
                         StyledText {
                             text: root.t("hostnameLabel")
@@ -478,7 +478,7 @@ Rectangle {
 
                     Column {
                         width: Math.floor((parent.width - Theme.spacingS) / 2)
-                        spacing: 4
+                        spacing: Theme.spacingXS
                         opacity: root.draft.dhcp ? 0.48 : 1.0
 
                         StyledText {
@@ -501,7 +501,7 @@ Rectangle {
 
                     Column {
                         width: Math.floor((parent.width - Theme.spacingS) / 2)
-                        spacing: 4
+                        spacing: Theme.spacingXS
 
                         StyledText {
                             width: parent.width
@@ -668,7 +668,7 @@ Rectangle {
 
             Column {
                 width: parent.width
-                spacing: 4
+                spacing: Theme.spacingXS
 
                 StyledText {
                     text: root.t("socks5Label")
@@ -717,7 +717,7 @@ Rectangle {
 
                 Column {
                     width: Math.floor((parent.width - Theme.spacingS) / 2)
-                    spacing: 4
+                    spacing: Theme.spacingXS
 
                     StyledText {
                         text: root.t("vpnClientCidr")
@@ -736,7 +736,7 @@ Rectangle {
 
                 Column {
                     width: Math.floor((parent.width - Theme.spacingS) / 2)
-                    spacing: 4
+                    spacing: Theme.spacingXS
 
                     StyledText {
                         text: root.t("vpnListenAddr")
@@ -793,16 +793,17 @@ Rectangle {
                         x: Theme.spacingS
                         y: Theme.spacingS
                         width: parent.width - Theme.spacingS * 2
-                        spacing: 6
+                        spacing: Theme.spacingXS
 
                         Row {
                             width: parent.width
-                            spacing: 6
+                            spacing: Theme.spacingXS
 
                             StyledButton {
-                                width: 46
-                                height: 24
-                                radius: 12
+                                id: protoBadgeBtn
+                                width: protoBadgeText.implicitWidth + Theme.spacingM * 2
+                                height: Theme.buttonHeightXXS - Theme.spacingXS
+                                radius: Theme.cornerRadiusFull
                                 color: modelData.proto === "udp" ? Theme.secondaryContainer : Theme.primary
                                 anchors.verticalCenter: parent.verticalCenter
                                 onClicked: {
@@ -814,6 +815,7 @@ Rectangle {
                                 }
 
                                 StyledText {
+                                    id: protoBadgeText
                                     anchors.centerIn: parent
                                     text: String(modelData.proto || "tcp").toUpperCase()
                                     color: modelData.proto === "udp" ? Theme.onSecondaryContainer : Theme.onPrimary
@@ -823,13 +825,14 @@ Rectangle {
                             }
 
                             Item {
-                                width: parent.width - 46 - 24 - 12
+                                width: parent.width - protoBadgeBtn.width - delRuleBtn.width - Theme.spacingXS * 2
                                 height: 1
                             }
 
                             DActionButton {
-                                buttonSize: 24
-                                iconSize: 15
+                                id: delRuleBtn
+                                buttonSize: Theme.buttonHeightXXS
+                                iconSize: Theme.iconSizeSmall
                                 iconName: "delete"
                                 iconColor: Theme.error
                                 backgroundColor: "transparent"
@@ -843,11 +846,11 @@ Rectangle {
 
                         Row {
                             width: parent.width
-                            spacing: 6
+                            spacing: Theme.spacingXS
 
                             Column {
-                                width: Math.floor((parent.width - 6) / 2)
-                                spacing: 2
+                                width: Math.floor((parent.width - Theme.spacingXS) / 2)
+                                spacing: Theme.spacingXXS
 
                                 StyledText {
                                     text: root.t("localBind")
@@ -868,8 +871,8 @@ Rectangle {
                             }
 
                             Column {
-                                width: Math.floor((parent.width - 6) / 2)
-                                spacing: 2
+                                width: Math.floor((parent.width - Theme.spacingXS) / 2)
+                                spacing: Theme.spacingXXS
 
                                 StyledText {
                                     text: root.t("dstAddress")
@@ -895,7 +898,7 @@ Rectangle {
 
             DButton {
                 width: parent.width
-                buttonHeight: 32
+                buttonHeight: Theme.buttonHeightXS
                 iconName: "add"
                 text: root.t("addPortForwardRule")
                 backgroundColor: Theme.secondaryContainer
@@ -976,7 +979,7 @@ Rectangle {
 
                     Column {
                         width: Math.floor((parent.width - Theme.spacingS) / 2)
-                        spacing: 4
+                        spacing: Theme.spacingXS
 
                         StyledText {
                             text: root.t("logDirLabel")
@@ -994,7 +997,7 @@ Rectangle {
 
                     Column {
                         width: Math.floor((parent.width - Theme.spacingS) / 2)
-                        spacing: 4
+                        spacing: Theme.spacingXS
 
                         StyledText {
                             text: root.t("logFileNameLabel")
@@ -1022,7 +1025,7 @@ Rectangle {
             // Live TOML Preview Header + Actions
             Item {
                 width: parent.width
-                height: 28
+                height: Theme.buttonHeightXXS
 
                 StyledText {
                     anchors.left: parent.left
@@ -1036,11 +1039,11 @@ Rectangle {
                 Row {
                     anchors.right: parent.right
                     anchors.verticalCenter: parent.verticalCenter
-                    spacing: 6
+                    spacing: Theme.spacingXS
 
                     DActionButton {
-                        buttonSize: 26
-                        iconSize: 15
+                        buttonSize: Theme.buttonHeightXXS
+                        iconSize: Theme.iconSizeSmall
                         iconName: root.showTomlSecret ? "visibility_off" : "visibility"
                         iconColor: Theme.surfaceVariantText
                         backgroundColor: Theme.ccIconBoxInactiveBg
@@ -1049,7 +1052,7 @@ Rectangle {
                     }
 
                     DButton {
-                        buttonHeight: 26
+                        buttonHeight: Theme.buttonHeightXXS
                         iconName: "content_copy"
                         text: root.t("copyToml")
                         backgroundColor: Theme.secondaryContainer
@@ -1076,7 +1079,7 @@ Rectangle {
                     width: parent.width - Theme.spacingM * 2
                     text: AssistantConfig.generateToml(root.draft, !root.showTomlSecret)
                     color: Theme.surfaceText
-                    font.family: "monospace"
+                    font.family: Theme.monoFontFamily
                     font.pixelSize: Theme.fontSizeSmall - 1
                     wrapMode: Text.WrapAnywhere
                 }
@@ -1097,7 +1100,7 @@ Rectangle {
             layoutDirection: Qt.RightToLeft
 
             DButton {
-                buttonHeight: 34
+                buttonHeight: Theme.buttonHeightXS
                 iconName: "bolt"
                 text: root.t("saveAndConnect")
                 enabled: root.canSave && !root.busy
@@ -1108,7 +1111,7 @@ Rectangle {
             }
 
             DButton {
-                buttonHeight: 34
+                buttonHeight: Theme.buttonHeightXS
                 text: root.t("save")
                 backgroundColor: Theme.secondaryContainer
                 textColor: Theme.onSecondaryContainer
@@ -1120,7 +1123,7 @@ Rectangle {
             }
 
             DButton {
-                buttonHeight: 34
+                buttonHeight: Theme.buttonHeightXS
                 text: root.t("cancel")
                 backgroundColor: "transparent"
                 textColor: Theme.surfaceVariantText

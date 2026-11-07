@@ -37,8 +37,8 @@ Rectangle {
         ? UiText.tr(lang, "copyHostname")
         : UiText.tr(lang, "copyIp")
 
-    readonly property int baseHeight: 56
-    readonly property int detailHeight: 46
+    readonly property int baseHeight: Theme.buttonHeightM
+    readonly property int detailHeight: Theme.buttonHeightS + Theme.spacingXS
 
     width: parent ? parent.width : 360
     height: baseHeight + (expanded ? detailHeight : 0)
@@ -56,9 +56,9 @@ Rectangle {
         // Contained rounded status bar
         Rectangle {
             id: modeIndicator
-            width: 4
-            height: 28
-            radius: 2
+            width: Theme.spacingXS
+            height: Theme.buttonHeightXXS
+            radius: Theme.cornerRadiusXXS
             color: root.modeColor
             anchors.left: parent.left
             anchors.leftMargin: Theme.spacingS
@@ -71,7 +71,7 @@ Rectangle {
             anchors.right: rightCluster.left
             anchors.rightMargin: Theme.spacingS
             anchors.verticalCenter: parent.verticalCenter
-            spacing: 2
+            spacing: Theme.spacingXXS
 
             Row {
                 width: parent.width
@@ -89,9 +89,9 @@ Rectangle {
 
                 Rectangle {
                     id: badgeRect
-                    height: 18
-                    width: badgeLabel.implicitWidth + 10
-                    radius: 9
+                    height: badgeLabel.implicitHeight + Theme.spacingXS
+                    width: badgeLabel.implicitWidth + Theme.spacingS
+                    radius: Theme.cornerRadiusFull
                     color: Qt.rgba(root.modeColor.r, root.modeColor.g, root.modeColor.b, 0.16)
                     anchors.verticalCenter: parent.verticalCenter
 
@@ -140,8 +140,8 @@ Rectangle {
             }
 
             DActionButton {
-                buttonSize: 28
-                iconSize: 15
+                buttonSize: Theme.buttonHeightXXS
+                iconSize: Theme.iconSizeSmall
                 iconName: "content_copy"
                 iconColor: Theme.surfaceText
                 backgroundColor: "transparent"
@@ -174,9 +174,9 @@ Rectangle {
     Column {
         visible: root.expanded
         x: Theme.spacingM
-        y: root.baseHeight + 6
+        y: root.baseHeight + Theme.spacingXS
         width: parent.width - Theme.spacingM * 2
-        spacing: 2
+        spacing: Theme.spacingXXS
 
         StyledText {
             width: parent.width

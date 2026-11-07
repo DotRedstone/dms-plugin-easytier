@@ -68,8 +68,8 @@ Column {
 
         DActionButton {
             id: addBtn
-            buttonSize: 36
-            iconSize: 20
+            buttonSize: Theme.buttonHeightXS + Theme.spacingXS
+            iconSize: Theme.iconSizeMedium
             iconName: "add"
             iconColor: Theme.onPrimary
             backgroundColor: Theme.primary
@@ -84,7 +84,7 @@ Column {
     Rectangle {
         visible: root.connected && root.connectors.length === 0
         width: parent.width
-        height: 46
+        height: Theme.buttonHeightS + Theme.spacingXS
         radius: Theme.cornerRadiusM
         color: Theme.ccPillInactiveBg
 
@@ -125,15 +125,15 @@ Column {
                 }
 
                 width: parent ? parent.width : 378
-                height: 52
+                height: Theme.buttonHeightM - Theme.spacingXS
                 radius: Theme.cornerRadiusM
                 color: Theme.ccPillInactiveBg
 
                 Rectangle {
                     id: dot
-                    width: 8
-                    height: 8
-                    radius: 4
+                    width: Theme.spacingS
+                    height: Theme.spacingS
+                    radius: Theme.cornerRadiusFull
                     color: connRow.stateColor
                     anchors.left: parent.left
                     anchors.leftMargin: Theme.spacingM
@@ -146,7 +146,7 @@ Column {
                     anchors.right: connActions.left
                     anchors.rightMargin: Theme.spacingXS
                     anchors.verticalCenter: parent.verticalCenter
-                    spacing: 2
+                    spacing: Theme.spacingXXS
 
                     StyledText {
                         width: parent.width
@@ -170,11 +170,11 @@ Column {
                     anchors.right: parent.right
                     anchors.rightMargin: Theme.spacingS
                     anchors.verticalCenter: parent.verticalCenter
-                    spacing: 2
+                    spacing: Theme.spacingXXS
 
                     DActionButton {
-                        buttonSize: 28
-                        iconSize: 15
+                        buttonSize: Theme.buttonHeightXXS
+                        iconSize: Theme.iconSizeSmall
                         iconName: "content_copy"
                         iconColor: Theme.surfaceText
                         backgroundColor: "transparent"
@@ -183,8 +183,8 @@ Column {
                     }
 
                     DActionButton {
-                        buttonSize: 28
-                        iconSize: 16
+                        buttonSize: Theme.buttonHeightXXS
+                        iconSize: Theme.iconSizeSmall
                         iconName: "delete_outline"
                         iconColor: Theme.error
                         backgroundColor: "transparent"

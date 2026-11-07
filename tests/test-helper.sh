@@ -34,8 +34,8 @@ OUT_MISSING="$(EASYTIER_CLI_BIN="$TMP_DIR/nonexistent-cli" "$HELPER" status "127
 [[ "$(jq -r '.serviceUnit' <<<"$OUT_MISSING")" == "easytier.service" ]] || fail "Short unit name should normalize to .service"
 pass "Missing CLI state handled cleanly"
 
-# [Test 3: Profile CRUD, 0600 Permissions & Status Sanitization]
-SAVE_OUT="$("$HELPER" profile-save '{
+# [Test 3: Profile CRUD via stdin, 0600 Permissions & Status Sanitization]
+SAVE_OUT="$(printf '%s' '{
   "name": "Lab Mesh",
   "configMode": "manual",
   "networkName": "example-net",
@@ -46,7 +46,7 @@ SAVE_OUT="$("$HELPER" profile-save '{
   "peers": ["tcp://198.51.100.10:11010"],
   "proxyCidrs": ["192.168.50.0/24"],
   "noTun": true
-}')"
+}' | "$HELPER" profile-save -)"
 PROF_ID="$(jq -r '.id' <<<"$SAVE_OUT")"
 [[ -n "$PROF_ID" && "$PROF_ID" != "null" ]] || fail "Expected generated profile ID"
 [[ "$(stat -c '%a' "$EASYTIER_DMS_CONFIG_DIR/profiles.json")" == "600" ]] || fail "profiles.json must be mode 0600"
@@ -57,7 +57,7 @@ if grep -q "PROFILE_SECRET_NEVER_IN_STATUS" <<<"$STATUS_WITH_PROF"; then
 fi
 [[ "$(jq -r '.activeProfileId' <<<"$STATUS_WITH_PROF")" == "$PROF_ID" ]] || fail "Expected activeProfileId in status"
 [[ "$(jq -r '.profileSummaries[0].name' <<<"$STATUS_WITH_PROF")" == "Lab Mesh" ]] || fail "Expected profile summary name"
-pass "Profile CRUD, 0600 permissions, and status sanitization verified"
+pass "Profile CRUD via stdin, 0600 permissions, and status sanitization verified"
 
 # [Test 4: Mocked Topology, Connectors & Secret Sanitization]
 MOCK_CLI="$TMP_DIR/mock-easytier-cli"
