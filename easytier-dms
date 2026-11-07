@@ -3,18 +3,34 @@ set -euo pipefail
 
 # [Configuration]
 EASYTIER_CLI_BIN="${EASYTIER_CLI_BIN:-easytier-cli}"
+EASYTIER_CORE_BIN="${EASYTIER_CORE_BIN:-easytier-core}"
 SYSTEMCTL_BIN="${SYSTEMCTL_BIN:-systemctl}"
+SYSTEMD_RUN_BIN="${SYSTEMD_RUN_BIN:-systemd-run}"
 PKEXEC_BIN="${PKEXEC_BIN:-pkexec}"
 SUDO_BIN="${SUDO_BIN:-sudo}"
+
+CONFIG_DIR="${EASYTIER_DMS_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/easytier-dms}"
+PROFILES_FILE="$CONFIG_DIR/profiles.json"
+RUNTIME_DIR="${EASYTIER_DMS_RUNTIME_DIR:-${XDG_RUNTIME_DIR:-/tmp/easytier-dms-$(id -u)}/easytier-dms}"
+MANAGED_ENV_FILE="$RUNTIME_DIR/managed.env"
+MANAGED_UNIT="dms-easytier-managed.service"
 
 DEFAULT_RPC="127.0.0.1:15888"
 DEFAULT_UNIT="easytier.service"
 DEFAULT_SCOPE="system"
 
+SELF_SCRIPT="$(readlink -f "${BASH_SOURCE[0]}")"
+
 # [Error Helpers]
 json_error() {
     local msg="${1:-Unknown error}"
     jq -cn --arg error "$msg" '{ok: false, error: $error}'
+}
+
+ensure_private_dir() {
+    local dir="$1"
+    mkdir -p "$dir"
+    chmod 700 "$dir" 2>/dev/null || true
 }
 
 # [Validation]
@@ -44,7 +60,69 @@ validate_scope() {
     [[ "$scope" == "system" || "$scope" == "user" ]]
 }
 
-# [Systemd Helpers]
+validate_connector_url() {
+    local url="$1"
+    if [[ -z "$url" || "$url" == -* || "$url" == *[[:space:]]* || "$url" != *://?* ]]; then
+        return 1
+    fi
+    local scheme="${url%%://*}"
+    if [[ -z "$scheme" || "$scheme" == *[!a-zA-Z0-9+.-]* ]]; then
+        return 1
+    fi
+    return 0
+}
+
+escape_env_value() {
+    local val="$1"
+    val="${val//\\/\\\\}"
+    val="${val//\"/\\\"}"
+    printf '%s' "$val"
+}
+
+# [Profile Storage]
+read_profiles_store() {
+    if [[ ! -f "$PROFILES_FILE" ]]; then
+        printf '{"activeProfileId":"","profiles":[]}\n'
+        return 0
+    fi
+    jq -c '{
+        activeProfileId: (.activeProfileId // "" | tostring),
+        profiles: (if (.profiles | type) == "array" then .profiles else [] end)
+    }' "$PROFILES_FILE" 2>/dev/null || printf '{"activeProfileId":"","profiles":[]}\n'
+}
+
+write_profiles_store() {
+    local content="$1"
+    ensure_private_dir "$CONFIG_DIR"
+    local tmp_file="${PROFILES_FILE}.tmp.$$"
+    (
+        umask 077
+        printf '%s\n' "$content" >"$tmp_file"
+    )
+    mv -f "$tmp_file" "$PROFILES_FILE"
+}
+
+sanitize_profiles_summary() {
+    local store_json="$1"
+    printf '%s' "$store_json" | jq -c '{
+        activeProfileId: (.activeProfileId // ""),
+        profiles: [
+            (.profiles // [])[]
+            | {
+                id: (.id // ""),
+                name: (.name // ""),
+                configMode: (.configMode // "manual"),
+                networkName: (.networkName // ""),
+                dhcp: (.dhcp == true),
+                ipv4: (.ipv4 // ""),
+                peerCount: ((.peers // []) | length),
+                noTun: (.noTun == true)
+            }
+        ]
+    }'
+}
+
+# [Systemd & Privileged Execution]
 service_state() {
     local unit="$1"
     local scope="$2"
@@ -62,6 +140,44 @@ service_state() {
     printf '%s\n' "${state:-inactive}"
 }
 
+managed_unit_info() {
+    local u_state s_state
+    u_state="$(service_state "$MANAGED_UNIT" "user")"
+    if [[ "$u_state" == "active" || "$u_state" == "activating" ]]; then
+        printf '%s\tuser\n' "$u_state"
+        return 0
+    fi
+    s_state="$(service_state "$MANAGED_UNIT" "system")"
+    if [[ "$s_state" == "active" || "$s_state" == "activating" ]]; then
+        printf '%s\tsystem\n' "$s_state"
+        return 0
+    fi
+    if [[ "$u_state" == "failed" ]]; then
+        printf 'failed\tuser\n'
+    elif [[ "$s_state" == "failed" ]]; then
+        printf 'failed\tsystem\n'
+    else
+        printf 'inactive\t\n'
+    fi
+}
+
+run_as_root() {
+    if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+        "$@"
+        return $?
+    fi
+    if command -v "$SUDO_BIN" >/dev/null 2>&1 && "$SUDO_BIN" -n true >/dev/null 2>&1; then
+        "$SUDO_BIN" -n "$@"
+        return $?
+    fi
+    if command -v "$PKEXEC_BIN" >/dev/null 2>&1; then
+        "$PKEXEC_BIN" "$@"
+        return $?
+    fi
+    printf 'pkexec or passwordless sudo is required\n' >&2
+    return 1
+}
+
 run_service_action() {
     local action="$1"
     local unit="$2"
@@ -77,32 +193,194 @@ run_service_action() {
         return $?
     fi
 
-    if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
-        "$SYSTEMCTL_BIN" "$action" "$unit"
-        return $?
+    local systemctl_path
+    systemctl_path="$(command -v "$SYSTEMCTL_BIN")"
+    run_as_root "$systemctl_path" "$action" "$unit"
+}
+
+# [Managed Profile Runner]
+start_managed_profile() {
+    local req_id="$1"
+    local rpc="$2"
+
+    if ! command -v "$EASYTIER_CORE_BIN" >/dev/null 2>&1; then
+        printf 'easytier-core is not installed\n' >&2
+        return 1
+    fi
+    if ! command -v "$SYSTEMD_RUN_BIN" >/dev/null 2>&1; then
+        printf 'systemd-run is not available\n' >&2
+        return 1
     fi
 
-    if command -v "$SUDO_BIN" >/dev/null 2>&1 && "$SUDO_BIN" -n true >/dev/null 2>&1; then
-        "$SUDO_BIN" -n "$SYSTEMCTL_BIN" "$action" "$unit"
-        return $?
+    local store profile_id profile_json
+    store="$(read_profiles_store)"
+    profile_id="$req_id"
+    if [[ -z "$profile_id" ]]; then
+        profile_id="$(jq -r '.activeProfileId // ""' <<<"$store")"
+    fi
+    if [[ -z "$profile_id" ]]; then
+        profile_id="$(jq -r '.profiles[0].id // ""' <<<"$store")"
+    fi
+    if [[ -z "$profile_id" ]]; then
+        printf 'No network profile configured\n' >&2
+        return 1
     fi
 
-    if command -v "$PKEXEC_BIN" >/dev/null 2>&1; then
-        local systemctl_path
+    profile_json="$(jq -ce --arg id "$profile_id" '(.profiles[] | select(.id == $id))' <<<"$store" 2>/dev/null || true)"
+    if [[ -z "$profile_json" ]]; then
+        printf 'Profile not found: %s\n' "$profile_id" >&2
+        return 1
+    fi
+
+    # Update activeProfileId if explicitly chosen
+    if [[ "$(jq -r '.activeProfileId // ""' <<<"$store")" != "$profile_id" ]]; then
+        store="$(jq -c --arg id "$profile_id" '.activeProfileId = $id' <<<"$store")"
+        write_profiles_store "$store"
+    fi
+
+    local config_mode config_server net_name net_secret dhcp ipv4 hostname no_tun
+    config_mode="$(jq -r '.configMode // "manual"' <<<"$profile_json")"
+    config_server="$(jq -r '.configServer // ""' <<<"$profile_json")"
+    net_name="$(jq -r '.networkName // ""' <<<"$profile_json")"
+    net_secret="$(jq -r '.networkSecret // ""' <<<"$profile_json")"
+    dhcp="$(jq -r '.dhcp == true' <<<"$profile_json")"
+    ipv4="$(jq -r '.ipv4 // ""' <<<"$profile_json")"
+    hostname="$(jq -r '.hostname // ""' <<<"$profile_json")"
+    no_tun="$(jq -r '.noTun == true' <<<"$profile_json")"
+
+    if [[ "$config_server" == *$'\n'* || "$config_server" == *$'\r'* || "$net_secret" == *$'\n'* || "$net_secret" == *$'\r'* ]]; then
+        printf 'Profile credentials must not contain newlines\n' >&2
+        return 1
+    fi
+
+    local -a core_args=("-r" "$rpc")
+
+    ensure_private_dir "$RUNTIME_DIR"
+    local tmp_env="${MANAGED_ENV_FILE}.tmp.$$"
+
+    if [[ "$config_mode" == "uri" ]]; then
+        if [[ -z "$config_server" ]]; then
+            printf 'Config server URI is required\n' >&2
+            return 1
+        fi
+        (
+            umask 077
+            printf 'ET_CONFIG_SERVER="%s"\n' "$(escape_env_value "$config_server")" >"$tmp_env"
+        )
+    else
+        if [[ -z "$net_name" || "$net_name" == -* ]]; then
+            printf 'Valid network name is required\n' >&2
+            return 1
+        fi
+        core_args+=("--network-name" "$net_name")
+        (
+            umask 077
+            if [[ -n "$net_secret" ]]; then
+                printf 'ET_NETWORK_SECRET="%s"\n' "$(escape_env_value "$net_secret")" >"$tmp_env"
+            else
+                : >"$tmp_env"
+            fi
+        )
+
+        if [[ "$dhcp" == "true" ]]; then
+            core_args+=("-d")
+        elif [[ -n "$ipv4" ]]; then
+            if [[ "$ipv4" == -* || "$ipv4" == *[[:space:]]* ]]; then
+                rm -f "$tmp_env"
+                printf 'Invalid virtual IPv4: %s\n' "$ipv4" >&2
+                return 1
+            fi
+            core_args+=("-i" "$ipv4")
+        fi
+
+        if [[ -n "$hostname" ]]; then
+            if [[ "$hostname" == -* || "$hostname" == *[!a-zA-Z0-9._-]* ]]; then
+                rm -f "$tmp_env"
+                printf 'Invalid hostname: %s\n' "$hostname" >&2
+                return 1
+            fi
+            core_args+=("--hostname" "$hostname")
+        fi
+
+        local peer
+        while IFS= read -r peer; do
+            [[ -z "$peer" ]] && continue
+            if ! validate_connector_url "$peer"; then
+                rm -f "$tmp_env"
+                printf 'Invalid peer URL: %s\n' "$peer" >&2
+                return 1
+            fi
+            core_args+=("-p" "$peer")
+        done < <(jq -r '(.peers // [])[] | tostring' <<<"$profile_json")
+
+        local cidr
+        while IFS= read -r cidr; do
+            [[ -z "$cidr" ]] && continue
+            if [[ "$cidr" == -* || "$cidr" == *[!0-9./a-fA-F:\>-]* ]]; then
+                rm -f "$tmp_env"
+                printf 'Invalid proxy CIDR: %s\n' "$cidr" >&2
+                return 1
+            fi
+            core_args+=("-n" "$cidr")
+        done < <(jq -r '(.proxyCidrs // [])[] | tostring' <<<"$profile_json")
+    fi
+
+    if [[ "$no_tun" == "true" ]]; then
+        core_args+=("--no-tun")
+    fi
+
+    mv -f "$tmp_env" "$MANAGED_ENV_FILE"
+
+    # Stop any user-scope managed instance first
+    "$SYSTEMCTL_BIN" --user stop "$MANAGED_UNIT" 2>/dev/null || true
+    "$SYSTEMCTL_BIN" --user reset-failed "$MANAGED_UNIT" 2>/dev/null || true
+
+    local core_path systemd_run_path systemctl_path
+    core_path="$(command -v "$EASYTIER_CORE_BIN")"
+    systemd_run_path="$(command -v "$SYSTEMD_RUN_BIN")"
+    systemctl_path="$(command -v "$SYSTEMCTL_BIN")"
+
+    if [[ "$no_tun" == "true" ]]; then
+        # Also stop system-scope managed instance if it was previously running
+        local sys_state
+        sys_state="$(service_state "$MANAGED_UNIT" "system")"
+        if [[ "$sys_state" == "active" || "$sys_state" == "activating" ]]; then
+            run_as_root "$systemctl_path" stop "$MANAGED_UNIT" || true
+        fi
+        "$systemd_run_path" --user \
+            --unit="$MANAGED_UNIT" \
+            --collect \
+            --property=Restart=on-failure \
+            --property=RestartSec=3s \
+            --property="EnvironmentFile=$MANAGED_ENV_FILE" \
+            "$core_path" "${core_args[@]}" >/dev/null
+    else
+        run_as_root "$SELF_SCRIPT" _root-managed-apply start "$systemctl_path" "$systemd_run_path" "$MANAGED_ENV_FILE" "$core_path" "${core_args[@]}"
+    fi
+}
+
+stop_managed_profile() {
+    if command -v "$SYSTEMCTL_BIN" >/dev/null 2>&1; then
+        local u_state s_state systemctl_path
         systemctl_path="$(command -v "$SYSTEMCTL_BIN")"
-        "$PKEXEC_BIN" "$systemctl_path" "$action" "$unit"
-        return $?
+        u_state="$(service_state "$MANAGED_UNIT" "user")"
+        if [[ "$u_state" == "active" || "$u_state" == "activating" || "$u_state" == "failed" ]]; then
+            "$systemctl_path" --user stop "$MANAGED_UNIT" 2>/dev/null || true
+            "$systemctl_path" --user reset-failed "$MANAGED_UNIT" 2>/dev/null || true
+        fi
+        s_state="$(service_state "$MANAGED_UNIT" "system")"
+        if [[ "$s_state" == "active" || "$s_state" == "activating" || "$s_state" == "failed" ]]; then
+            run_as_root "$SELF_SCRIPT" _root-managed-apply stop "$systemctl_path"
+        fi
     fi
-
-    printf 'pkexec or passwordless sudo is required to control %s\n' "$unit" >&2
-    return 1
+    rm -f "$MANAGED_ENV_FILE" 2>/dev/null || true
 }
 
 # [RPC Query & Sanitization]
 fetch_node_sanitized() {
     local rpc="$1"
     local raw
-    if ! raw="$("$EASYTIER_CLI_BIN" -p "$rpc" -o json node 2>/dev/null)"; then
+    if ! raw="$("$EASYTIER_CLI_BIN" -p "$rpc" -o json node)"; then
         return 1
     fi
     printf '%s' "$raw" | jq -ce '{
@@ -119,9 +397,9 @@ fetch_node_sanitized() {
 
 fetch_subcommand_array() {
     local rpc="$1"
-    local sub="$2"
+    shift
     local raw
-    if ! raw="$("$EASYTIER_CLI_BIN" -p "$rpc" -o json "$sub" 2>/dev/null)"; then
+    if ! raw="$("$EASYTIER_CLI_BIN" -p "$rpc" -o json "$@" 2>/dev/null)"; then
         printf '[]'
         return 0
     fi
@@ -138,12 +416,22 @@ build_status_json() {
         cli_available="true"
     fi
 
-    local svc_state
+    local svc_state svc_active="false"
     svc_state="$(service_state "$unit" "$scope")"
-    local svc_active="false"
     if [[ "$svc_state" == "active" ]]; then
         svc_active="true"
     fi
+
+    local mgd_info mgd_state mgd_scope mgd_active="false"
+    mgd_info="$(managed_unit_info)"
+    mgd_state="${mgd_info%%$'\t'*}"
+    mgd_scope="${mgd_info#*$'\t'}"
+    if [[ "$mgd_state" == "active" ]]; then
+        mgd_active="true"
+    fi
+
+    local prof_summary
+    prof_summary="$(sanitize_profiles_summary "$(read_profiles_store)")"
 
     if [[ "$cli_available" != "true" ]]; then
         jq -cn \
@@ -151,7 +439,11 @@ build_status_json() {
             --arg unit "$unit" \
             --arg scope "$scope" \
             --arg rpc "$rpc" \
+            --arg mgdState "$mgd_state" \
+            --arg mgdScope "$mgd_scope" \
             --argjson svcActive "$svc_active" \
+            --argjson mgdActive "$mgd_active" \
+            --argjson profSummary "$prof_summary" \
             '{
                 ok: true,
                 cliAvailable: false,
@@ -159,11 +451,17 @@ build_status_json() {
                 serviceState: $svcState,
                 serviceUnit: $unit,
                 serviceScope: $scope,
+                managedActive: $mgdActive,
+                managedState: $mgdState,
+                managedScope: $mgdScope,
+                activeProfileId: $profSummary.activeProfileId,
+                profileSummaries: $profSummary.profiles,
                 rpcPortal: $rpc,
                 rpcConnected: false,
                 self: null,
                 peers: [],
                 routes: [],
+                connectors: [],
                 traffic: { rxBytes: 0, txBytes: 0, forwardedBytes: 0 },
                 counts: { total: 0, p2p: 0, relay: 0 },
                 error: ""
@@ -171,14 +469,25 @@ build_status_json() {
         return 0
     fi
 
-    local node_json=""
-    if ! node_json="$(fetch_node_sanitized "$rpc" 2>/dev/null)"; then
+    ensure_private_dir "$RUNTIME_DIR"
+    local node_json="" node_err="" no_instance="false" tmp_err_file="$RUNTIME_DIR/rpc.err.$$"
+    if ! node_json="$(fetch_node_sanitized "$rpc" 2>"$tmp_err_file")"; then
+        node_err="$(cat "$tmp_err_file" 2>/dev/null || true)"
+        rm -f "$tmp_err_file" 2>/dev/null || true
+        if [[ "$node_err" == *"no running instances found"* ]]; then
+            no_instance="true"
+        fi
         jq -cn \
             --arg svcState "$svc_state" \
             --arg unit "$unit" \
             --arg scope "$scope" \
             --arg rpc "$rpc" \
+            --arg mgdState "$mgd_state" \
+            --arg mgdScope "$mgd_scope" \
             --argjson svcActive "$svc_active" \
+            --argjson mgdActive "$mgd_active" \
+            --argjson noInstance "$no_instance" \
+            --argjson profSummary "$prof_summary" \
             '{
                 ok: true,
                 cliAvailable: true,
@@ -186,33 +495,47 @@ build_status_json() {
                 serviceState: $svcState,
                 serviceUnit: $unit,
                 serviceScope: $scope,
+                managedActive: $mgdActive,
+                managedState: $mgdState,
+                managedScope: $mgdScope,
+                activeProfileId: $profSummary.activeProfileId,
+                profileSummaries: $profSummary.profiles,
                 rpcPortal: $rpc,
                 rpcConnected: false,
+                noInstance: $noInstance,
                 self: null,
                 peers: [],
                 routes: [],
+                connectors: [],
                 traffic: { rxBytes: 0, txBytes: 0, forwardedBytes: 0 },
                 counts: { total: 0, p2p: 0, relay: 0 },
                 error: ""
             }'
         return 0
     fi
+    rm -f "$tmp_err_file" 2>/dev/null || true
 
-    local peers_raw routes_raw stats_raw
+    local peers_raw routes_raw stats_raw connectors_raw
     peers_raw="$(fetch_subcommand_array "$rpc" peer)"
     routes_raw="$(fetch_subcommand_array "$rpc" route)"
     stats_raw="$(fetch_subcommand_array "$rpc" stats)"
+    connectors_raw="$(fetch_subcommand_array "$rpc" connector list)"
 
     jq -cn \
         --arg svcState "$svc_state" \
         --arg unit "$unit" \
         --arg scope "$scope" \
         --arg rpc "$rpc" \
+        --arg mgdState "$mgd_state" \
+        --arg mgdScope "$mgd_scope" \
         --argjson svcActive "$svc_active" \
+        --argjson mgdActive "$mgd_active" \
+        --argjson profSummary "$prof_summary" \
         --argjson node "$node_json" \
         --argjson peers "$peers_raw" \
         --argjson routes "$routes_raw" \
         --argjson stats "$stats_raw" \
+        --argjson connectors "$connectors_raw" \
         '
         def strip_cidr($s):
             ($s // "" | tostring) as $v
@@ -230,6 +553,20 @@ build_status_json() {
               elif ($c | contains("relay")) then "relay"
               else "other"
               end;
+
+        def connector_state($st):
+            if ($st | type) == "number" then
+                if $st == 0 then "connected"
+                elif $st == 2 then "connecting"
+                else "disconnected"
+                end
+            else
+                ($st // "" | tostring | ascii_downcase) as $s
+                | if ($s | contains("connect")) and ($s | contains("dis") | not) then
+                    if ($s | contains("ing")) then "connecting" else "connected" end
+                  else "disconnected"
+                  end
+            end;
 
         def stat_val($name):
             ([ $stats[] | select(.name == $name) | (.value // 0) ] | first) // 0;
@@ -277,6 +614,16 @@ build_status_json() {
             }
             | select((.proxyCidrs | length) > 0)
         ] as $proxyRoutes
+        | [
+            $connectors[]
+            | (if (.url | type) == "object" then (.url.url // "") else (.url // "" | tostring) end) as $u
+            | select(($u | length) > 0)
+            | {
+                url: $u,
+                proto: (($u | split("://")[0]) // ""),
+                state: connector_state(.status)
+            }
+        ] as $normConnectors
         | {
             ok: true,
             cliAvailable: true,
@@ -284,6 +631,11 @@ build_status_json() {
             serviceState: $svcState,
             serviceUnit: $unit,
             serviceScope: $scope,
+            managedActive: $mgdActive,
+            managedState: $mgdState,
+            managedScope: $mgdScope,
+            activeProfileId: $profSummary.activeProfileId,
+            profileSummaries: $profSummary.profiles,
             rpcPortal: $rpc,
             rpcConnected: true,
             self: {
@@ -299,6 +651,7 @@ build_status_json() {
             },
             peers: $sortedPeers,
             routes: $proxyRoutes,
+            connectors: $normConnectors,
             traffic: {
                 rxBytes: stat_val("traffic_bytes_rx"),
                 txBytes: stat_val("traffic_bytes_tx"),
@@ -337,6 +690,40 @@ wait_for_rpc() {
 cmd="${1:-status}"
 
 case "$cmd" in
+    _root-managed-apply)
+        if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+            printf 'Root privileges required\n' >&2
+            exit 1
+        fi
+        sub_op="${2:-}"
+        systemctl_path="${3:-systemctl}"
+        if [[ "$sub_op" == "stop" ]]; then
+            "$systemctl_path" stop "$MANAGED_UNIT" 2>/dev/null || true
+            "$systemctl_path" reset-failed "$MANAGED_UNIT" 2>/dev/null || true
+            exit 0
+        elif [[ "$sub_op" == "start" ]]; then
+            systemd_run_path="${4:-systemd-run}"
+            env_file="${5:-}"
+            core_path="${6:-}"
+            shift 6
+            "$systemctl_path" stop "$MANAGED_UNIT" 2>/dev/null || true
+            "$systemctl_path" reset-failed "$MANAGED_UNIT" 2>/dev/null || true
+            "$systemd_run_path" \
+                --unit="$MANAGED_UNIT" \
+                --collect \
+                --property=Restart=on-failure \
+                --property=RestartSec=3s \
+                --property="CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW" \
+                --property="AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW" \
+                --property="EnvironmentFile=$env_file" \
+                "$core_path" "$@" >/dev/null
+            exit 0
+        else
+            printf 'Invalid internal sub-operation\n' >&2
+            exit 1
+        fi
+        ;;
+
     status)
         rpc="${2:-$DEFAULT_RPC}"
         raw_unit="${3:-$DEFAULT_UNIT}"
@@ -381,8 +768,6 @@ case "$cmd" in
             cur_state="$(service_state "$unit" "$scope")"
             if [[ "$cur_state" == "active" || "$cur_state" == "activating" ]]; then
                 target_action="stop"
-            elif command -v "$EASYTIER_CLI_BIN" >/dev/null 2>&1 && "$EASYTIER_CLI_BIN" -p "$rpc" -o json node >/dev/null 2>&1; then
-                target_action="stop"
             else
                 target_action="start"
             fi
@@ -404,6 +789,236 @@ case "$cmd" in
         fi
 
         build_status_json "$rpc" "$unit" "$scope" | jq -c --arg action "$target_action" '. + {action: $action}'
+        ;;
+
+    managed-start|managed-stop|managed-restart|managed-toggle)
+        profile_id="${2:-}"
+        rpc="${3:-$DEFAULT_RPC}"
+        raw_unit="${4:-$DEFAULT_UNIT}"
+        scope="${5:-$DEFAULT_SCOPE}"
+
+        if [[ -n "$profile_id" && "$profile_id" == *[!a-zA-Z0-9_-]* ]]; then
+            json_error "Invalid profile ID"
+            exit 1
+        fi
+        if ! validate_rpc "$rpc"; then
+            json_error "Invalid RPC portal: $rpc"
+            exit 1
+        fi
+        if ! unit="$(normalize_unit "$raw_unit")"; then
+            json_error "Invalid systemd unit: $raw_unit"
+            exit 1
+        fi
+        if ! validate_scope "$scope"; then
+            json_error "Invalid systemd scope: $scope"
+            exit 1
+        fi
+
+        target_action="start"
+        if [[ "$cmd" == "managed-stop" ]]; then
+            target_action="stop"
+        elif [[ "$cmd" == "managed-restart" ]]; then
+            target_action="restart"
+        elif [[ "$cmd" == "managed-toggle" ]]; then
+            mgd_info="$(managed_unit_info)"
+            mgd_state="${mgd_info%%$'\t'*}"
+            if [[ "$mgd_state" == "active" || "$mgd_state" == "activating" ]]; then
+                target_action="stop"
+            else
+                target_action="start"
+            fi
+        fi
+
+        err_output=""
+        if [[ "$target_action" == "stop" ]]; then
+            if ! err_output="$(stop_managed_profile 2>&1)"; then
+                clean_err="$(printf '%s' "$err_output" | tr '\r\n' '  ' | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//')"
+                json_error "${clean_err:-Failed to stop managed EasyTier}"
+                exit 1
+            fi
+            if command -v "$EASYTIER_CLI_BIN" >/dev/null 2>&1; then
+                wait_for_rpc "$rpc" "false" 8
+            fi
+        else
+            if ! err_output="$(start_managed_profile "$profile_id" "$rpc" 2>&1)"; then
+                clean_err="$(printf '%s' "$err_output" | tr '\r\n' '  ' | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//')"
+                json_error "${clean_err:-Failed to start managed profile}"
+                exit 1
+            fi
+            if command -v "$EASYTIER_CLI_BIN" >/dev/null 2>&1; then
+                wait_for_rpc "$rpc" "true" 14
+            fi
+        fi
+
+        build_status_json "$rpc" "$unit" "$scope" | jq -c --arg action "$target_action" '. + {action: $action}'
+        ;;
+
+    profile-list)
+        store="$(read_profiles_store)"
+        jq -cn --argjson store "$store" '{
+            ok: true,
+            activeProfileId: $store.activeProfileId,
+            profiles: $store.profiles
+        }'
+        ;;
+
+    profile-save)
+        raw_profile="${2:-}"
+        if [[ -z "$raw_profile" ]]; then
+            json_error "Missing profile JSON payload"
+            exit 1
+        fi
+
+        gen_id="prof-$(date +%s)-$RANDOM"
+        normalized=""
+        if ! normalized="$(printf '%s' "$raw_profile" | jq -ce --arg genId "$gen_id" '
+            def trim_str: tostring | gsub("^\\s+|\\s+$"; "");
+            {
+                id: ((.id // "" | trim_str) | if length > 0 then . else $genId end),
+                name: (.name // "" | trim_str),
+                configMode: (if (.configMode // "manual") == "uri" then "uri" else "manual" end),
+                configServer: (.configServer // "" | trim_str),
+                networkName: (.networkName // "" | trim_str),
+                networkSecret: (.networkSecret // "" | tostring),
+                dhcp: (.dhcp != false),
+                ipv4: (.ipv4 // "" | trim_str),
+                hostname: (.hostname // "" | trim_str),
+                peers: [ (.peers // [])[] | trim_str | select(length > 0) ],
+                proxyCidrs: [ (.proxyCidrs // [])[] | trim_str | select(length > 0) ],
+                noTun: (.noTun == true)
+            }
+        ' 2>/dev/null)"; then
+            json_error "Malformed profile JSON"
+            exit 1
+        fi
+
+        prof_id="$(jq -r '.id' <<<"$normalized")"
+        prof_name="$(jq -r '.name' <<<"$normalized")"
+        cfg_mode="$(jq -r '.configMode' <<<"$normalized")"
+        cfg_srv="$(jq -r '.configServer' <<<"$normalized")"
+        net_name="$(jq -r '.networkName' <<<"$normalized")"
+
+        if [[ "$prof_id" == *[!a-zA-Z0-9_-]* ]]; then
+            json_error "Invalid profile ID"
+            exit 1
+        fi
+        if [[ -z "$prof_name" ]]; then
+            json_error "Profile name is required"
+            exit 1
+        fi
+        if [[ "$cfg_mode" == "uri" && -z "$cfg_srv" ]]; then
+            json_error "Config server URI is required"
+            exit 1
+        fi
+        if [[ "$cfg_mode" == "manual" && ( -z "$net_name" || "$net_name" == -* ) ]]; then
+            json_error "Valid network name is required"
+            exit 1
+        fi
+
+        while IFS= read -r p_url; do
+            [[ -z "$p_url" ]] && continue
+            if ! validate_connector_url "$p_url"; then
+                json_error "Invalid peer URL: $p_url"
+                exit 1
+            fi
+        done < <(jq -r '.peers[]' <<<"$normalized")
+
+        store="$(read_profiles_store)"
+        updated_store="$(jq -c --argjson prof "$normalized" '
+            (if any(.profiles[]; .id == $prof.id) then
+                .profiles |= map(if .id == $prof.id then $prof else . end)
+             else
+                .profiles += [$prof]
+             end)
+            | if (.activeProfileId // "") == "" then .activeProfileId = $prof.id else . end
+        ' <<<"$store")"
+        write_profiles_store "$updated_store"
+
+        jq -cn --arg id "$prof_id" --argjson store "$updated_store" '{
+            ok: true,
+            id: $id,
+            activeProfileId: $store.activeProfileId,
+            profiles: $store.profiles
+        }'
+        ;;
+
+    profile-delete)
+        del_id="${2:-}"
+        if [[ -z "$del_id" || "$del_id" == *[!a-zA-Z0-9_-]* ]]; then
+            json_error "Invalid profile ID"
+            exit 1
+        fi
+        store="$(read_profiles_store)"
+        updated_store="$(jq -c --arg id "$del_id" '
+            .profiles |= map(select(.id != $id))
+            | if .activeProfileId == $id then
+                .activeProfileId = (.profiles[0].id // "")
+              else . end
+        ' <<<"$store")"
+        write_profiles_store "$updated_store"
+        jq -cn --argjson store "$updated_store" '{
+            ok: true,
+            activeProfileId: $store.activeProfileId,
+            profiles: $store.profiles
+        }'
+        ;;
+
+    profile-select)
+        sel_id="${2:-}"
+        if [[ -z "$sel_id" || "$sel_id" == *[!a-zA-Z0-9_-]* ]]; then
+            json_error "Invalid profile ID"
+            exit 1
+        fi
+        store="$(read_profiles_store)"
+        if [[ "$(jq -r --arg id "$sel_id" 'any(.profiles[]; .id == $id)' <<<"$store")" != "true" ]]; then
+            json_error "Profile not found: $sel_id"
+            exit 1
+        fi
+        updated_store="$(jq -c --arg id "$sel_id" '.activeProfileId = $id' <<<"$store")"
+        write_profiles_store "$updated_store"
+        jq -cn --argjson store "$updated_store" '{
+            ok: true,
+            activeProfileId: $store.activeProfileId,
+            profiles: $store.profiles
+        }'
+        ;;
+
+    connector-add|connector-remove)
+        conn_url="${2:-}"
+        rpc="${3:-$DEFAULT_RPC}"
+        raw_unit="${4:-$DEFAULT_UNIT}"
+        scope="${5:-$DEFAULT_SCOPE}"
+
+        if ! validate_connector_url "$conn_url"; then
+            json_error "Invalid connector URL: $conn_url"
+            exit 1
+        fi
+        if ! validate_rpc "$rpc"; then
+            json_error "Invalid RPC portal: $rpc"
+            exit 1
+        fi
+        if ! unit="$(normalize_unit "$raw_unit")"; then
+            json_error "Invalid systemd unit: $raw_unit"
+            exit 1
+        fi
+        if ! validate_scope "$scope"; then
+            json_error "Invalid systemd scope: $scope"
+            exit 1
+        fi
+
+        sub_action="add"
+        if [[ "$cmd" == "connector-remove" ]]; then
+            sub_action="remove"
+        fi
+
+        err_output=""
+        if ! err_output="$("$EASYTIER_CLI_BIN" -p "$rpc" connector "$sub_action" "$conn_url" 2>&1)"; then
+            clean_err="$(printf '%s' "$err_output" | tr '\r\n' '  ' | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//')"
+            json_error "${clean_err:-Failed to $sub_action connector}"
+            exit 1
+        fi
+
+        build_status_json "$rpc" "$unit" "$scope"
         ;;
 
     *)

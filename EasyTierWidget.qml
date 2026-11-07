@@ -17,12 +17,14 @@ PluginComponent {
     readonly property bool isPrimaryInstance: isLiveInstance && EasyTierBus.primaryInstance === root
     property bool _ipcReady: false
     property int _refreshSeq: 0
+    property var _activePopupItem: null
 
     // [Settings Bindings]
     readonly property string lang: UiText.resolveLang(
         pluginData.language || "auto",
         Qt.locale().name
     )
+    readonly property string backendMode: pluginData.backendMode === "systemd" ? "systemd" : "managed"
     readonly property string pillMode: pluginData.pillMode || "peers"
     readonly property string copyField: pluginData.copyField || "ip"
     readonly property bool rightClickToggle: pluginData.rightClickToggle !== false && pluginData.rightClickToggle !== "false"
@@ -37,17 +39,37 @@ PluginComponent {
         const raw = String(pluginData.rpcPortal || "").trim();
         return raw.length > 0 ? raw : "127.0.0.1:15888";
     }
+    readonly property string managedRpcPortal: rpcPortal === "127.0.0.1:15888" ? "127.0.0.1:15889" : rpcPortal
+    readonly property string effectiveRpcPortal: backendMode === "managed" ? managedRpcPortal : rpcPortal
 
     // [Reactive State]
     readonly property var snap: EasyTierBus.snapshot
+    readonly property var profiles: EasyTierBus.profiles
+    readonly property string activeProfileId: EasyTierBus.activeProfileId || (snap && snap.activeProfileId ? snap.activeProfileId : "")
+    readonly property string activeProfileName: {
+        for (let i = 0; i < profiles.length; i++) {
+            if (profiles[i].id === activeProfileId)
+                return profiles[i].name || "";
+        }
+        const summaries = snap && Array.isArray(snap.profileSummaries) ? snap.profileSummaries : [];
+        for (let j = 0; j < summaries.length; j++) {
+            if (summaries[j].id === activeProfileId)
+                return summaries[j].name || "";
+        }
+        return "";
+    }
     readonly property bool busy: EasyTierBus.busy
     readonly property string lastError: EasyTierBus.lastError
     readonly property bool cliAvailable: snap ? snap.cliAvailable === true : true
     readonly property bool serviceActive: snap ? snap.serviceActive === true : false
+    readonly property bool managedActive: snap ? snap.managedActive === true : false
+    readonly property bool backendActive: backendMode === "managed" ? managedActive : serviceActive
     readonly property bool connected: snap ? snap.rpcConnected === true : false
+    readonly property bool noInstance: snap ? snap.noInstance === true : false
     readonly property var selfNode: snap && snap.self ? snap.self : null
     readonly property var peers: snap && Array.isArray(snap.peers) ? snap.peers : []
     readonly property var routes: snap && Array.isArray(snap.routes) ? snap.routes : []
+    readonly property var connectors: snap && Array.isArray(snap.connectors) ? snap.connectors : []
     readonly property var traffic: snap && snap.traffic ? snap.traffic : ({ rxBytes: 0, txBytes: 0, forwardedBytes: 0 })
     readonly property var counts: snap && snap.counts ? snap.counts : ({ total: 0, p2p: 0, relay: 0 })
     readonly property bool hasError: !cliAvailable || lastError.length > 0
@@ -56,7 +78,7 @@ PluginComponent {
         if (!cliAvailable)
             return "ERR";
         if (!connected)
-            return serviceActive ? "…" : UiText.tr(lang, "off");
+            return backendActive ? "…" : UiText.tr(lang, "off");
         if (pillMode === "icon")
             return "";
         if (pillMode === "ip")
@@ -68,6 +90,16 @@ PluginComponent {
 
     function t(key, arg1) {
         return UiText.tr(root.lang, key, arg1);
+    }
+
+    function setBackendMode(nextMode) {
+        if (!pluginService || !pluginId)
+            return;
+        const clean = nextMode === "systemd" ? "systemd" : "managed";
+        if (pluginService.savePluginData) {
+            pluginService.savePluginData(pluginId, "backendMode", clean);
+            loadPluginData();
+        }
     }
 
     // [Instance Lifecycle]
@@ -95,14 +127,18 @@ PluginComponent {
     onIsLiveInstanceChanged: {
         if (isLiveInstance) {
             registerInstance();
-            if (EasyTierBus.snapshot === null)
+            if (EasyTierBus.snapshot === null) {
+                loadProfiles();
                 refresh();
+            }
         }
     }
 
     Component.onCompleted: {
         if (isLiveInstance) {
             registerInstance();
+            if (isPrimaryInstance || EasyTierBus.profiles.length === 0)
+                loadProfiles();
             refresh();
         }
     }
@@ -111,7 +147,8 @@ PluginComponent {
         unregisterInstance();
     }
 
-    onRpcPortalChanged: if (isPrimaryInstance) refresh()
+    onBackendModeChanged: if (isPrimaryInstance) refresh()
+    onEffectiveRpcPortalChanged: if (isPrimaryInstance) refresh()
     onServiceUnitChanged: if (isPrimaryInstance) refresh()
     onServiceScopeChanged: if (isPrimaryInstance) refresh()
 
@@ -134,24 +171,25 @@ PluginComponent {
             ToastService.showInfo(title, msg);
     }
 
-    // [Backend Actions]
+    // [Backend Queries & Controls]
     function refresh() {
         if (!isLiveInstance || EasyTierBus.busy)
             return;
         const seq = ++_refreshSeq;
         Proc.runCommand(
             "easytier.status",
-            [helper, "status", rpcPortal, serviceUnit, serviceScope],
+            [helper, "status", effectiveRpcPortal, serviceUnit, serviceScope],
             (output, exitCode) => {
                 if (seq !== _refreshSeq && EasyTierBus.busy)
                     return;
-                if (exitCode !== 0) {
+                if (exitCode !== 0)
                     return;
-                }
                 try {
                     const parsed = JSON.parse(output);
                     if (parsed && parsed.ok === true) {
                         EasyTierBus.snapshot = parsed;
+                        if (!EasyTierBus.activeProfileId && parsed.activeProfileId)
+                            EasyTierBus.activeProfileId = parsed.activeProfileId;
                     }
                 } catch (e) {}
             },
@@ -160,19 +198,38 @@ PluginComponent {
         );
     }
 
-    function controlService(action) {
-        if (!cliAvailable && action !== "stop")
+    function loadProfiles() {
+        if (!isLiveInstance)
             return;
+        Proc.runCommand(
+            "easytier.profiles",
+            [helper, "profile-list"],
+            (output, exitCode) => {
+                if (exitCode !== 0)
+                    return;
+                try {
+                    const parsed = JSON.parse(output);
+                    if (parsed && parsed.ok === true) {
+                        EasyTierBus.profiles = Array.isArray(parsed.profiles) ? parsed.profiles : [];
+                        EasyTierBus.activeProfileId = parsed.activeProfileId || "";
+                    }
+                } catch (e) {}
+            },
+            0,
+            5000
+        );
+    }
+
+    function runControlCommand(args, onDone) {
         if (EasyTierBus.busy)
             return;
-
         EasyTierBus.busy = true;
         EasyTierBus.lastError = "";
         ++_refreshSeq;
 
         Proc.runCommand(
             "easytier.control",
-            [helper, action, serviceUnit, serviceScope, rpcPortal],
+            args,
             (output, exitCode) => {
                 EasyTierBus.busy = false;
                 let parsed = null;
@@ -181,15 +238,11 @@ PluginComponent {
                 } catch (e) {}
 
                 if (exitCode === 0 && parsed && parsed.ok === true) {
-                    EasyTierBus.snapshot = parsed;
+                    if ("rpcConnected" in parsed)
+                        EasyTierBus.snapshot = parsed;
                     EasyTierBus.lastError = "";
-                    const effective = parsed.action || action;
-                    if (effective === "stop")
-                        showToast(root.t("title"), root.t("serviceStoppedToast"), false);
-                    else if (effective === "restart")
-                        showToast(root.t("title"), root.t("serviceRestarted"), false);
-                    else
-                        showToast(root.t("title"), root.t("serviceStarted"), false);
+                    if (onDone)
+                        onDone(parsed);
                     postActionRefreshTimer.restart();
                 } else {
                     const errMsg = (parsed && parsed.error) ? String(parsed.error) : root.t("controlFailed");
@@ -204,11 +257,143 @@ PluginComponent {
     }
 
     function toggleService() {
-        controlService("toggle");
+        if (backendMode === "managed") {
+            if (!managedActive && !connected && profiles.length === 0) {
+                triggerPopout();
+                Qt.callLater(() => {
+                    if (root._activePopupItem)
+                        root._activePopupItem.jumpToProfiles(true);
+                });
+                return;
+            }
+            runControlCommand(
+                [helper, "managed-toggle", activeProfileId, managedRpcPortal, serviceUnit, serviceScope],
+                parsed => {
+                    showToast(
+                        root.t("title"),
+                        parsed.action === "stop" ? root.t("serviceStoppedToast") : root.t("serviceStarted"),
+                        false
+                    );
+                }
+            );
+            return;
+        }
+
+        runControlCommand(
+            [helper, "toggle", serviceUnit, serviceScope, rpcPortal],
+            parsed => {
+                showToast(
+                    root.t("title"),
+                    parsed.action === "stop" ? root.t("serviceStoppedToast") : root.t("serviceStarted"),
+                    false
+                );
+            }
+        );
     }
 
     function restartService() {
-        controlService("restart");
+        const args = backendMode === "managed"
+            ? [helper, "managed-restart", activeProfileId, managedRpcPortal, serviceUnit, serviceScope]
+            : [helper, "restart", serviceUnit, serviceScope, rpcPortal];
+        runControlCommand(args, () => {
+            showToast(root.t("title"), root.t("serviceRestarted"), false);
+        });
+    }
+
+    function connectProfile(profileId) {
+        setBackendMode("managed");
+        EasyTierBus.activeProfileId = profileId;
+        runControlCommand(
+            [helper, "managed-start", profileId, managedRpcPortal, serviceUnit, serviceScope],
+            () => {
+                showToast(root.t("title"), root.t("serviceStarted"), false);
+                if (root._activePopupItem)
+                    root._activePopupItem.currentTab = 0;
+            }
+        );
+    }
+
+    function selectProfile(profileId) {
+        Proc.runCommand(
+            "easytier.profileSelect",
+            [helper, "profile-select", profileId],
+            (output, exitCode) => {
+                if (exitCode !== 0)
+                    return;
+                try {
+                    const parsed = JSON.parse(output);
+                    if (parsed && parsed.ok === true) {
+                        EasyTierBus.activeProfileId = parsed.activeProfileId || profileId;
+                        EasyTierBus.profiles = Array.isArray(parsed.profiles) ? parsed.profiles : EasyTierBus.profiles;
+                    }
+                } catch (e) {}
+            },
+            0,
+            5000
+        );
+    }
+
+    function saveProfile(profileObj, connectImmediately) {
+        Proc.runCommand(
+            "easytier.profileSave",
+            [helper, "profile-save", JSON.stringify(profileObj)],
+            (output, exitCode) => {
+                let parsed = null;
+                try {
+                    parsed = JSON.parse(output);
+                } catch (e) {}
+                if (exitCode === 0 && parsed && parsed.ok === true) {
+                    EasyTierBus.profiles = Array.isArray(parsed.profiles) ? parsed.profiles : [];
+                    EasyTierBus.activeProfileId = parsed.id || parsed.activeProfileId || "";
+                    showToast(root.t("title"), root.t("profileSaved"), false);
+                    if (connectImmediately && parsed.id) {
+                        connectProfile(parsed.id);
+                    } else {
+                        refresh();
+                    }
+                } else {
+                    const errMsg = (parsed && parsed.error) ? String(parsed.error) : root.t("controlFailed");
+                    showToast(root.t("title"), errMsg, true);
+                }
+            },
+            0,
+            5000
+        );
+    }
+
+    function deleteProfile(profileId) {
+        Proc.runCommand(
+            "easytier.profileDelete",
+            [helper, "profile-delete", profileId],
+            (output, exitCode) => {
+                let parsed = null;
+                try {
+                    parsed = JSON.parse(output);
+                } catch (e) {}
+                if (exitCode === 0 && parsed && parsed.ok === true) {
+                    EasyTierBus.profiles = Array.isArray(parsed.profiles) ? parsed.profiles : [];
+                    EasyTierBus.activeProfileId = parsed.activeProfileId || "";
+                    showToast(root.t("title"), root.t("profileDeleted"), false);
+                    refresh();
+                }
+            },
+            0,
+            5000
+        );
+    }
+
+    function addConnector(url) {
+        runControlCommand(
+            [helper, "connector-add", url, effectiveRpcPortal, serviceUnit, serviceScope],
+            () => showToast(root.t("title"), root.t("connectorAdded") + ": " + url, false)
+        );
+    }
+
+    function removeConnector(url) {
+        runControlCommand(
+            [helper, "connector-remove", url, effectiveRpcPortal, serviceUnit, serviceScope],
+            () => showToast(root.t("title"), root.t("connectorRemoved") + ": " + url, false)
+        );
     }
 
     // [Timers]
@@ -241,13 +426,19 @@ PluginComponent {
 
         function status(): string {
             return JSON.stringify({
+                backendMode: root.backendMode,
+                rpcPortal: root.effectiveRpcPortal,
                 connected: root.connected,
+                noInstance: root.noInstance,
                 serviceActive: root.serviceActive,
+                managedActive: root.managedActive,
+                activeProfileId: root.activeProfileId,
                 ipv4: root.selfNode ? root.selfNode.ipv4 : "",
                 networkName: root.selfNode ? root.selfNode.networkName : "",
                 peers: root.counts.total || 0,
                 p2p: root.counts.p2p || 0,
-                relay: root.counts.relay || 0
+                relay: root.counts.relay || 0,
+                connectors: root.connectors.length
             });
         }
 
@@ -257,12 +448,18 @@ PluginComponent {
         }
 
         function start(): string {
-            root.controlService("start");
+            if (root.backendMode === "managed")
+                root.runControlCommand([root.helper, "managed-start", root.activeProfileId, root.managedRpcPortal, root.serviceUnit, root.serviceScope], null);
+            else
+                root.runControlCommand([root.helper, "start", root.serviceUnit, root.serviceScope, root.rpcPortal], null);
             return "START_REQUESTED";
         }
 
         function stop(): string {
-            root.controlService("stop");
+            if (root.backendMode === "managed")
+                root.runControlCommand([root.helper, "managed-stop", "", root.managedRpcPortal, root.serviceUnit, root.serviceScope], null);
+            else
+                root.runControlCommand([root.helper, "stop", root.serviceUnit, root.serviceScope, root.rpcPortal], null);
             return "STOP_REQUESTED";
         }
 
@@ -290,11 +487,14 @@ PluginComponent {
             return root.t("starting");
         if (!root.cliAvailable)
             return root.t("cliMissing");
-        if (!root.connected)
-            return root.serviceActive ? root.t("rpcUnreachable") : root.t("disconnected");
+        if (!root.connected) {
+            if (root.noInstance && root.backendActive)
+                return root.t("noInstanceHint");
+            return root.backendActive ? root.t("rpcUnreachable") : root.t("disconnected");
+        }
         return root.t("onlineCount", root.counts.total || 0);
     }
-    ccWidgetIsActive: root.connected || root.serviceActive
+    ccWidgetIsActive: root.connected || root.backendActive
     onCcWidgetToggled: root.toggleService()
     onCcWidgetExpanded: root.refresh()
 
@@ -347,43 +547,28 @@ PluginComponent {
     }
 
     // [Popout Panel]
-    popoutWidth: 410
+    popoutWidth: 420
 
     popoutContent: Component {
         PopoutComponent {
             id: popup
 
-            property string searchQuery: ""
-            property int filterIndex: 0
-            property string expandedPeerKey: ""
+            property int currentTab: 0
 
             headerText: root.t("title")
             detailsText: ""
             showCloseButton: false
 
-            readonly property var filteredPeers: {
-                const all = root.peers;
-                let base = all;
-                if (filterIndex === 1)
-                    base = all.filter(p => p.mode === "p2p");
-                else if (filterIndex === 2)
-                    base = all.filter(p => p.mode === "relay");
-
-                const q = searchQuery.trim().toLowerCase();
-                if (!q)
-                    return base;
-                return base.filter(p =>
-                    String(p.hostname || "").toLowerCase().indexOf(q) >= 0
-                    || String(p.ipv4 || "").toLowerCase().indexOf(q) >= 0
-                    || String(p.proto || "").toLowerCase().indexOf(q) >= 0
-                    || String(p.cost || "").toLowerCase().indexOf(q) >= 0
-                );
+            function jumpToProfiles(createNew) {
+                currentTab = 1;
+                if (createNew)
+                    profilesTab.openNewEditor();
             }
 
             readonly property int maxViewportHeight: {
                 const screenH = root.parentScreen && root.parentScreen.height > 0 ? root.parentScreen.height : 1080;
-                const reserve = Math.max(root.barThickness + root.barSpacing, 56) + 96;
-                return Math.max(260, Math.min(620, Math.floor(screenH - reserve)));
+                const reserve = Math.max(root.barThickness + root.barSpacing, 56) + 140;
+                return Math.max(280, Math.min(640, Math.floor(screenH - reserve)));
             }
 
             function commitGeometry() {
@@ -396,6 +581,17 @@ PluginComponent {
             }
 
             onImplicitHeightChanged: commitGeometry()
+
+            Component.onCompleted: {
+                root._activePopupItem = popup;
+                if (EasyTierBus.profiles.length === 0)
+                    root.loadProfiles();
+            }
+
+            Component.onDestruction: {
+                if (root._activePopupItem === popup)
+                    root._activePopupItem = null;
+            }
 
             onParentPopoutChanged: {
                 if (parentPopout) {
@@ -410,10 +606,10 @@ PluginComponent {
 
                     DToggle {
                         anchors.verticalCenter: parent.verticalCenter
-                        checked: root.connected || root.serviceActive
+                        checked: root.connected || root.backendActive
                         toggling: root.busy
                         enabled: root.cliAvailable && !root.busy
-                        Accessible.name: (root.connected || root.serviceActive) ? root.t("disableService") : root.t("enableService")
+                        Accessible.name: (root.connected || root.backendActive) ? root.t("disableService") : root.t("enableService")
                         onToggled: root.toggleService()
                     }
 
@@ -428,7 +624,7 @@ PluginComponent {
                         iconName: "restart_alt"
                         iconColor: Theme.primary
                         backgroundColor: Theme.ccPillInactiveBg
-                        enabled: (root.connected || root.serviceActive) && !root.busy
+                        enabled: (root.connected || root.backendActive) && !root.busy
                         tooltipText: root.t("restart")
                         onClicked: root.restartService()
                     }
@@ -441,9 +637,32 @@ PluginComponent {
                         backgroundColor: Theme.ccPillInactiveBg
                         enabled: !root.busy
                         tooltipText: root.t("refresh")
-                        onClicked: root.refresh()
+                        onClicked: {
+                            root.loadProfiles();
+                            root.refresh();
+                        }
                     }
                 }
+            }
+
+            DTabBar {
+                width: parent.width
+                currentIndex: popup.currentTab
+                tabHeight: 40
+                spacing: Theme.spacingXS
+                model: [
+                    { icon: "hub", text: root.t("tabTopology") },
+                    { icon: "tune", text: root.t("tabProfiles") },
+                    { icon: "cable", text: root.t("tabConnectors") }
+                ]
+                onTabClicked: index => {
+                    popup.currentTab = index;
+                }
+            }
+
+            Item {
+                width: parent.width
+                height: Theme.spacingXS
             }
 
             DFlickable {
@@ -460,7 +679,6 @@ PluginComponent {
                     width: bodyViewport.width
                     spacing: Theme.spacingS
 
-                    // Error banner
                     Rectangle {
                         visible: root.lastError.length > 0 || !root.cliAvailable
                         width: parent.width
@@ -479,260 +697,59 @@ PluginComponent {
                         }
                     }
 
-                    // Self Node Hero Card
-                    Rectangle {
+                    TopologyView {
+                        visible: popup.currentTab === 0
                         width: parent.width
-                        height: heroColumn.implicitHeight + Theme.spacingM * 2
-                        radius: Theme.cornerRadiusL
-                        color: Theme.ccPillInactiveBg
-
-                        Column {
-                            id: heroColumn
-                            x: Theme.spacingM
-                            y: Theme.spacingM
-                            width: parent.width - Theme.spacingM * 2
-                            spacing: Theme.spacingS
-
-                            Row {
-                                width: parent.width
-                                spacing: Theme.spacingM
-
-                                Rectangle {
-                                    id: heroIconBox
-                                    width: 42
-                                    height: 42
-                                    radius: Theme.cornerRadiusM
-                                    color: root.connected ? Theme.primary : Theme.ccIconBoxInactiveBg
-                                    anchors.verticalCenter: parent.verticalCenter
-
-                                    EasyTierLogo {
-                                        anchors.centerIn: parent
-                                        size: 22
-                                        color: root.connected ? Theme.onPrimary : Theme.primary
-                                    }
-                                }
-
-                                Column {
-                                    width: parent.width - heroIconBox.width - (copySelfBtn.visible ? copySelfBtn.width + Theme.spacingS : 0) - Theme.spacingM
-                                    anchors.verticalCenter: parent.verticalCenter
-                                    spacing: 2
-
-                                    Row {
-                                        spacing: Theme.spacingXS
-
-                                        StyledText {
-                                            text: root.connected && root.selfNode && root.selfNode.hostname
-                                                ? root.selfNode.hostname
-                                                : root.t("title")
-                                            color: Theme.surfaceText
-                                            font.pixelSize: Theme.fontSizeMedium
-                                            font.weight: Font.Medium
-                                            anchors.verticalCenter: parent.verticalCenter
-                                        }
-
-                                        Rectangle {
-                                            visible: root.connected
-                                            height: 18
-                                            width: selfBadgeLabel.implicitWidth + 10
-                                            radius: 9
-                                            color: Theme.secondaryContainer
-                                            anchors.verticalCenter: parent.verticalCenter
-
-                                            StyledText {
-                                                id: selfBadgeLabel
-                                                anchors.centerIn: parent
-                                                text: root.t("thisDevice")
-                                                color: Theme.onSecondaryContainer
-                                                font.pixelSize: Theme.fontSizeSmall - 1
-                                                font.weight: Font.Medium
-                                            }
-                                        }
-                                    }
-
-                                    StyledText {
-                                        width: parent.width
-                                        color: Theme.surfaceVariantText
-                                        font.pixelSize: Theme.fontSizeSmall
-                                        elide: Text.ElideRight
-                                        text: {
-                                            if (root.busy)
-                                                return root.t("starting");
-                                            if (!root.cliAvailable)
-                                                return root.t("cliMissing");
-                                            if (!root.connected)
-                                                return root.serviceActive ? root.t("rpcUnreachable") : root.t("serviceStopped");
-                                            const parts = [];
-                                            if (root.selfNode && root.selfNode.ipv4)
-                                                parts.push(root.selfNode.ipv4);
-                                            if (root.selfNode && root.selfNode.networkName)
-                                                parts.push(root.selfNode.networkName);
-                                            return parts.join(" • ");
-                                        }
-                                    }
-                                }
-
-                                DActionButton {
-                                    id: copySelfBtn
-                                    visible: root.connected && root.selfNode !== null && String(root.selfNode.ipv4 || "").length > 0
-                                    buttonSize: 30
-                                    iconSize: 16
-                                    iconName: "content_copy"
-                                    iconColor: Theme.surfaceText
-                                    backgroundColor: "transparent"
-                                    tooltipText: root.t("copyIp")
-                                    anchors.verticalCenter: parent.verticalCenter
-                                    onClicked: root.copyText(root.selfNode ? root.selfNode.ipv4 : "")
-                                }
-                            }
-
-                            // Metrics footer inside Hero Card when connected
-                            Rectangle {
-                                visible: root.connected
-                                width: parent.width
-                                height: 1
-                                color: Theme.outlineVariant
-                                opacity: 0.35
-                            }
-
-                            Row {
-                                visible: root.connected
-                                width: parent.width
-                                spacing: Theme.spacingM
-
-                                StyledText {
-                                    color: Theme.surfaceVariantText
-                                    font.pixelSize: Theme.fontSizeSmall
-                                    text: root.t("natType") + ": " + ((root.selfNode && root.selfNode.natType) ? root.selfNode.natType : "Unknown")
-                                }
-
-                                StyledText {
-                                    color: Theme.surfaceVariantText
-                                    font.pixelSize: Theme.fontSizeSmall
-                                    text: "↓ " + UiText.formatBytes(root.traffic.rxBytes) + "  ↑ " + UiText.formatBytes(root.traffic.txBytes)
-                                }
-
-                                StyledText {
-                                    visible: root.selfNode && root.selfNode.version
-                                    color: Theme.surfaceVariantText
-                                    font.pixelSize: Theme.fontSizeSmall
-                                    text: root.selfNode && root.selfNode.version ? ("v" + root.selfNode.version) : ""
-                                }
-                            }
-                        }
+                        lang: root.lang
+                        backendMode: root.backendMode
+                        serviceUnit: root.serviceUnit
+                        activeProfileName: root.activeProfileName
+                        profileCount: root.profiles.length
+                        cliAvailable: root.cliAvailable
+                        busy: root.busy
+                        connected: root.connected
+                        backendActive: root.backendActive
+                        noInstance: root.noInstance && root.backendActive
+                        selfNode: root.selfNode
+                        peers: root.peers
+                        routes: root.routes
+                        traffic: root.traffic
+                        counts: root.counts
+                        copyField: root.copyField
+                        showRoutes: root.showRoutes
+                        onCopyRequested: value => root.copyText(value)
+                        onOpenProfilesTab: createNew => popup.jumpToProfiles(createNew)
                     }
 
-                    // Search & Filter Controls
-                    DSearchField {
-                        visible: root.connected && root.peers.length > 0
+                    ProfilesView {
+                        id: profilesTab
+                        visible: popup.currentTab === 1
                         width: parent.width
-                        placeholderText: root.t("searchPlaceholder")
-                        text: popup.searchQuery
-                        onTextEdited: popup.searchQuery = text
+                        lang: root.lang
+                        backendMode: root.backendMode
+                        serviceUnit: root.serviceUnit
+                        profiles: root.profiles
+                        activeProfileId: root.activeProfileId
+                        busy: root.busy
+                        connected: root.connected
+                        managedActive: root.managedActive
+                        onBackendModeSelected: mode => root.setBackendMode(mode)
+                        onSelectProfileRequested: id => root.selectProfile(id)
+                        onConnectProfileRequested: id => root.connectProfile(id)
+                        onDeleteProfileRequested: id => root.deleteProfile(id)
+                        onSaveProfileRequested: (profileObj, connectNow) => root.saveProfile(profileObj, connectNow)
                     }
 
-                    DFilterChips {
-                        visible: root.connected && root.peers.length > 0
+                    ConnectorsView {
+                        visible: popup.currentTab === 2
                         width: parent.width
-                        currentIndex: popup.filterIndex
-                        showCounts: true
-                        model: [
-                            { label: root.t("allPeers"), count: root.counts.total || 0 },
-                            { label: root.t("p2pPeers"), count: root.counts.p2p || 0 },
-                            { label: root.t("relayPeers"), count: root.counts.relay || 0 }
-                        ]
-                        onSelectionChanged: index => popup.filterIndex = index
-                    }
-
-                    // Empty Peer State
-                    Rectangle {
-                        visible: root.connected && popup.filteredPeers.length === 0
-                        width: parent.width
-                        height: 48
-                        radius: Theme.cornerRadiusM
-                        color: Theme.ccPillInactiveBg
-
-                        StyledText {
-                            anchors.centerIn: parent
-                            text: popup.searchQuery.length > 0 ? root.t("noMatchingPeers") : root.t("noPeers")
-                            color: Theme.surfaceVariantText
-                            font.pixelSize: Theme.fontSizeSmall
-                        }
-                    }
-
-                    // Peer List
-                    Column {
-                        visible: root.connected && popup.filteredPeers.length > 0
-                        width: parent.width
-                        spacing: Theme.spacingXS
-
-                        Repeater {
-                            model: popup.filteredPeers
-
-                            delegate: PeerRow {
-                                width: parent ? parent.width : 378
-                                lang: root.lang
-                                copyField: root.copyField
-                                expanded: popup.expandedPeerKey === (modelData.id || modelData.ipv4 || modelData.hostname)
-                                onToggleExpand: {
-                                    const key = modelData.id || modelData.ipv4 || modelData.hostname;
-                                    popup.expandedPeerKey = popup.expandedPeerKey === key ? "" : key;
-                                }
-                                onCopyRequested: (value, label) => root.copyText(value)
-                            }
-                        }
-                    }
-
-                    // Subnet Proxy Routes Section
-                    Column {
-                        visible: root.connected && root.showRoutes && root.routes.length > 0
-                        width: parent.width
-                        spacing: Theme.spacingXS
-
-                        StyledText {
-                            leftPadding: Theme.spacingXS
-                            text: root.t("routes")
-                            color: Theme.surfaceVariantText
-                            font.pixelSize: Theme.fontSizeSmall
-                            font.weight: Font.Medium
-                        }
-
-                        Repeater {
-                            model: root.routes
-
-                            delegate: Rectangle {
-                                required property var modelData
-                                width: parent ? parent.width : 378
-                                height: routeCol.implicitHeight + Theme.spacingS * 2
-                                radius: Theme.cornerRadiusM
-                                color: Theme.ccPillInactiveBg
-
-                                Column {
-                                    id: routeCol
-                                    x: Theme.spacingM
-                                    y: Theme.spacingS
-                                    width: parent.width - Theme.spacingM * 2
-                                    spacing: 2
-
-                                    StyledText {
-                                        width: parent.width
-                                        text: (modelData.proxyCidrs || []).join(", ")
-                                        color: Theme.surfaceText
-                                        font.pixelSize: Theme.fontSizeSmall
-                                        font.weight: Font.Medium
-                                        elide: Text.ElideRight
-                                    }
-
-                                    StyledText {
-                                        width: parent.width
-                                        text: root.t("viaHop", modelData.hostname || modelData.nextHopHostname || modelData.ipv4 || "-")
-                                            + (modelData.pathLen > 0 ? (" • " + root.t("hopsCount", modelData.pathLen)) : "")
-                                        color: Theme.surfaceVariantText
-                                        font.pixelSize: Theme.fontSizeSmall
-                                        elide: Text.ElideRight
-                                    }
-                                }
-                            }
-                        }
+                        lang: root.lang
+                        connected: root.connected
+                        busy: root.busy
+                        connectors: root.connectors
+                        onAddConnectorRequested: url => root.addConnector(url)
+                        onRemoveConnectorRequested: url => root.removeConnector(url)
+                        onCopyRequested: value => root.copyText(value)
                     }
                 }
             }

@@ -6,6 +6,8 @@ QtObject {
     property var primaryInstance: null
     property var instances: []
     property var snapshot: null
+    property var profiles: []
+    property string activeProfileId: ""
     property bool busy: false
     property string lastError: ""
 }

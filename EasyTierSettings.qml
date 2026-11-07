@@ -28,6 +28,17 @@ PluginSettings {
     }
 
     SelectionSetting {
+        settingKey: "backendMode"
+        label: root.t("settingBackendMode")
+        description: root.t("settingBackendModeDesc")
+        defaultValue: "managed"
+        options: [
+            { label: root.t("modeManaged"), value: "managed" },
+            { label: root.t("modeSystemd"), value: "systemd" }
+        ]
+    }
+
+    SelectionSetting {
         id: langSetting
         settingKey: "language"
         label: root.t("settingLanguage")

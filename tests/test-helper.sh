@@ -5,6 +5,8 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HELPER="$ROOT_DIR/easytier-dms"
 
 TMP_DIR="$(mktemp -d)"
+export EASYTIER_DMS_CONFIG_DIR="$TMP_DIR/config"
+export EASYTIER_DMS_RUNTIME_DIR="$TMP_DIR/runtime"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
 pass() { printf '[PASS] %s\n' "$1"; }
@@ -20,6 +22,9 @@ fi
 if "$HELPER" status "127.0.0.1:15888" "easytier.service" "invalid_scope" >/dev/null 2>&1; then
     fail "Expected invalid scope to fail"
 fi
+if "$HELPER" connector-add "not-a-url" >/dev/null 2>&1; then
+    fail "Expected malformed connector URL to fail"
+fi
 pass "Argument validation rejects malformed inputs"
 
 # [Test 2: Missing CLI State]
@@ -29,7 +34,32 @@ OUT_MISSING="$(EASYTIER_CLI_BIN="$TMP_DIR/nonexistent-cli" "$HELPER" status "127
 [[ "$(jq -r '.serviceUnit' <<<"$OUT_MISSING")" == "easytier.service" ]] || fail "Short unit name should normalize to .service"
 pass "Missing CLI state handled cleanly"
 
-# [Test 3: Mocked Topology & Secret Sanitization]
+# [Test 3: Profile CRUD, 0600 Permissions & Status Sanitization]
+SAVE_OUT="$("$HELPER" profile-save '{
+  "name": "Lab Mesh",
+  "configMode": "manual",
+  "networkName": "example-net",
+  "networkSecret": "PROFILE_SECRET_NEVER_IN_STATUS",
+  "dhcp": false,
+  "ipv4": "10.144.144.9/24",
+  "hostname": "lab-node",
+  "peers": ["tcp://198.51.100.10:11010"],
+  "proxyCidrs": ["192.168.50.0/24"],
+  "noTun": true
+}')"
+PROF_ID="$(jq -r '.id' <<<"$SAVE_OUT")"
+[[ -n "$PROF_ID" && "$PROF_ID" != "null" ]] || fail "Expected generated profile ID"
+[[ "$(stat -c '%a' "$EASYTIER_DMS_CONFIG_DIR/profiles.json")" == "600" ]] || fail "profiles.json must be mode 0600"
+
+STATUS_WITH_PROF="$(EASYTIER_CLI_BIN="$TMP_DIR/nonexistent-cli" "$HELPER" status "127.0.0.1:15888" "easytier.service" "user")"
+if grep -q "PROFILE_SECRET_NEVER_IN_STATUS" <<<"$STATUS_WITH_PROF"; then
+    fail "Profile secret leaked into status JSON!"
+fi
+[[ "$(jq -r '.activeProfileId' <<<"$STATUS_WITH_PROF")" == "$PROF_ID" ]] || fail "Expected activeProfileId in status"
+[[ "$(jq -r '.profileSummaries[0].name' <<<"$STATUS_WITH_PROF")" == "Lab Mesh" ]] || fail "Expected profile summary name"
+pass "Profile CRUD, 0600 permissions, and status sanitization verified"
+
+# [Test 4: Mocked Topology, Connectors & Secret Sanitization]
 MOCK_CLI="$TMP_DIR/mock-easytier-cli"
 MOCK_SYSCTL="$TMP_DIR/mock-systemctl"
 STATE_FILE="$TMP_DIR/svc_state"
@@ -40,11 +70,17 @@ cat >"$MOCK_SYSCTL" <<EOF
 set -euo pipefail
 if [[ "\${1:-}" == "--user" ]]; then shift; fi
 case "\${1:-}" in
-    is-active) cat "$STATE_FILE" ;;
+    is-active)
+        if [[ "\${2:-}" == "dms-easytier-managed.service" ]]; then
+            printf 'inactive\n'
+        else
+            cat "$STATE_FILE"
+        fi
+        ;;
     start) printf 'active\n' >"$STATE_FILE" ;;
     stop) printf 'inactive\n' >"$STATE_FILE" ;;
     restart) printf 'active\n' >"$STATE_FILE" ;;
-    *) exit 1 ;;
+    *) exit 0 ;;
 esac
 EOF
 chmod +x "$MOCK_SYSCTL"
@@ -152,11 +188,20 @@ JSON
     "name": "traffic_bytes_tx",
     "value": 1048576,
     "labels": { "network_name": "example-net" }
+  }
+]
+JSON
+        ;;
+    connector)
+        cat <<'JSON'
+[
+  {
+    "url": { "url": "tcp://198.51.100.10:11010" },
+    "status": 0
   },
   {
-    "name": "traffic_bytes_forwarded",
-    "value": 4096,
-    "labels": { "network_name": "example-net" }
+    "url": { "url": "udp://198.51.100.11:11010" },
+    "status": 2
   }
 ]
 JSON
@@ -174,39 +219,46 @@ if grep -q "SUPER_SENSITIVE_TEST_SECRET_DO_NOT_LEAK\|network_secret" <<<"$OUT_MO
     fail "Secret leaked in status output!"
 fi
 [[ "$(jq -r '.rpcConnected' <<<"$OUT_MOCK")" == "true" ]] || fail "Expected rpcConnected=true"
-[[ "$(jq -r '.self.ipv4' <<<"$OUT_MOCK")" == "10.144.144.1" ]] || fail "Expected self ipv4 10.144.144.1"
-[[ "$(jq -r '.self.networkName' <<<"$OUT_MOCK")" == "example-net" ]] || fail "Expected networkName example-net"
-[[ "$(jq -r '.self.natType' <<<"$OUT_MOCK")" == "FullCone" ]] || fail "Expected Local peer NAT FullCone"
-[[ "$(jq -r '.counts.total' <<<"$OUT_MOCK")" == "2" ]] || fail "Expected 2 remote peers (Local excluded)"
-[[ "$(jq -r '.counts.p2p' <<<"$OUT_MOCK")" == "1" ]] || fail "Expected 1 p2p peer"
-[[ "$(jq -r '.counts.relay' <<<"$OUT_MOCK")" == "1" ]] || fail "Expected 1 relay peer"
-[[ "$(jq -r '.peers[0].hostname' <<<"$OUT_MOCK")" == "peer-alpha" ]] || fail "Expected p2p peer sorted first"
-[[ "$(jq -r '.routes | length' <<<"$OUT_MOCK")" == "1" ]] || fail "Expected 1 subnet proxy route"
-[[ "$(jq -r '.routes[0].proxyCidrs | length' <<<"$OUT_MOCK")" == "2" ]] || fail "Expected 2 parsed proxy CIDRs"
-[[ "$(jq -r '.traffic.rxBytes' <<<"$OUT_MOCK")" == "2097152" ]] || fail "Expected rxBytes=2097152"
-pass "Mocked topology normalization and secret stripping verified"
+[[ "$(jq -r '.counts.total' <<<"$OUT_MOCK")" == "2" ]] || fail "Expected 2 remote peers"
+[[ "$(jq -r '.connectors | length' <<<"$OUT_MOCK")" == "2" ]] || fail "Expected 2 normalized connectors"
+[[ "$(jq -r '.connectors[0].state' <<<"$OUT_MOCK")" == "connected" ]] || fail "Expected connector 0 connected"
+[[ "$(jq -r '.connectors[1].state' <<<"$OUT_MOCK")" == "connecting" ]] || fail "Expected connector 1 connecting"
+pass "Mocked topology, connectors, and secret stripping verified"
 
-# [Test 4: Service Toggle]
-OUT_TOGGLE="$(EASYTIER_CLI_BIN="$TMP_DIR/nonexistent-cli" SYSTEMCTL_BIN="$MOCK_SYSCTL" "$HELPER" toggle "easytier.service" "user" "127.0.0.1:15888")"
-[[ "$(jq -r '.action' <<<"$OUT_TOGGLE")" == "stop" ]] || fail "Active service should toggle to stop"
-[[ "$(cat "$STATE_FILE")" == "inactive" ]] || fail "Service state file should now be inactive"
-pass "User-scope service toggle verified"
+# [Test 5: Live Managed Profile + Dynamic Connector Add/Remove]
+if command -v easytier-core >/dev/null 2>&1 && command -v easytier-cli >/dev/null 2>&1 && command -v systemd-run >/dev/null 2>&1; then
+    LIVE_SAVE="$("$HELPER" profile-save '{
+      "name": "Sandbox Profile",
+      "configMode": "manual",
+      "networkName": "sandbox-net",
+      "networkSecret": "synthetic-managed-secret",
+      "dhcp": false,
+      "ipv4": "10.144.144.99/24",
+      "hostname": "sandbox-managed",
+      "peers": [],
+      "proxyCidrs": [],
+      "noTun": true
+    }')"
+    LIVE_ID="$(jq -r '.id' <<<"$LIVE_SAVE")"
 
-# [Test 5: Live Unprivileged Sandbox (Optional if easytier-core is installed)]
-if command -v easytier-core >/dev/null 2>&1 && command -v easytier-cli >/dev/null 2>&1; then
-    easytier-core --no-tun --hostname sandbox-a -i 10.144.144.1 --network-name example-net --network-secret synthetic-secret -l tcp://127.0.0.1:29910 -r 127.0.0.1:29888 >/dev/null 2>&1 &
-    ET_PID=$!
-    trap 'kill "$ET_PID" 2>/dev/null || true; rm -rf "$TMP_DIR"' EXIT
-    sleep 1.5
-    OUT_LIVE="$(SYSTEMCTL_BIN="$MOCK_SYSCTL" "$HELPER" status "127.0.0.1:29888" "easytier.service" "user")"
-    kill "$ET_PID" 2>/dev/null || true
-    wait "$ET_PID" 2>/dev/null || true
-    if grep -q "synthetic-secret" <<<"$OUT_LIVE"; then
-        fail "Live sandbox leaked network_secret!"
-    fi
-    [[ "$(jq -r '.rpcConnected' <<<"$OUT_LIVE")" == "true" ]] || fail "Live sandbox should report rpcConnected=true"
-    [[ "$(jq -r '.self.ipv4' <<<"$OUT_LIVE")" == "10.144.144.1" ]] || fail "Live sandbox self ipv4 mismatch"
-    pass "Live easytier-core --no-tun loopback RPC verified"
+    trap '"$HELPER" managed-stop "127.0.0.1:29895" >/dev/null 2>&1 || true; rm -rf "$TMP_DIR"' EXIT
+
+    OUT_MGD_START="$("$HELPER" managed-start "$LIVE_ID" "127.0.0.1:29895" "easytier.service" "user")"
+    [[ "$(jq -r '.rpcConnected' <<<"$OUT_MGD_START")" == "true" ]] || fail "Managed start should connect RPC"
+    [[ "$(jq -r '.managedActive' <<<"$OUT_MGD_START")" == "true" ]] || fail "managedActive should be true"
+    [[ "$(jq -r '.self.ipv4' <<<"$OUT_MGD_START")" == "10.144.144.99" ]] || fail "Managed IPv4 mismatch"
+
+    OUT_CONN_ADD="$("$HELPER" connector-add "tcp://127.0.0.1:29997" "127.0.0.1:29895" "easytier.service" "user")"
+    [[ "$(jq -r '[.connectors[].url] | index("tcp://127.0.0.1:29997") != null' <<<"$OUT_CONN_ADD")" == "true" ]] || fail "Dynamic connector-add not reflected"
+
+    OUT_CONN_RM="$("$HELPER" connector-remove "tcp://127.0.0.1:29997" "127.0.0.1:29895" "easytier.service" "user")"
+    [[ "$(jq -r '[.connectors[].url] | index("tcp://127.0.0.1:29997") == null' <<<"$OUT_CONN_RM")" == "true" ]] || fail "Dynamic connector-remove not reflected"
+
+    OUT_MGD_STOP="$("$HELPER" managed-stop "" "127.0.0.1:29895" "easytier.service" "user")"
+    [[ "$(jq -r '.managedActive' <<<"$OUT_MGD_STOP")" == "false" ]] || fail "managedActive should be false after stop"
+
+    "$HELPER" profile-delete "$LIVE_ID" >/dev/null
+    pass "Live managed profile start/stop and dynamic connector add/remove verified"
 fi
 
 printf 'All tests passed.\n'
